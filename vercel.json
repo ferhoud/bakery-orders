@@ -1,7 +1,3 @@
 {
-  "regions": ["cdg1"],
-  "functions": {
-    "api/**": { "maxDuration": 10, "memory": 1024 },
-    "pages/**": { "maxDuration": 10, "memory": 1024 }
-  }
+  "regions": ["cdg1"]
 }

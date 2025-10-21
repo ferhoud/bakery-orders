@@ -1,0 +1,10 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+
+:root {
+  --ui-font: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI',
+             Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji',
+             'Segoe UI Emoji', sans-serif;
+}
+html, body, #__next { height: 100%; }
+body { margin: 0; font-family: var(--ui-font); }
+button, input { font-family: inherit; }

@@ -1,6 +1,3 @@
 /** @type {import('next').NextConfig} */
-const nextConfig = {
-  reactStrictMode: true,
-  images: { unoptimized: true }, // évite /_next/image => lambda
-};
+const nextConfig = { reactStrictMode: true, images: { unoptimized: true } };
 module.exports = nextConfig;

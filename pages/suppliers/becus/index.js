@@ -6,7 +6,7 @@ import { supabase } from "../../../lib/supabaseClient";
 
 const SUPPLIER_KEY = "becus";
 const SHOP_LABEL = "BM Boulangerie";
-const UI_TAG = "v-becus-ui-2026-02-08-5b";
+const UI_TAG = "v-becus-ui-2026-02-08-6";
 
 // ---------- Dates (Bécus = Jeudi) ----------
 function pad2(n) {
@@ -273,6 +273,67 @@ async function upsertItem(orderId, productId, qty) {
   }
 }
 
+function mapFromItems(items) {
+  const m = {};
+  for (const it of items || []) m[String(it.product_id)] = Number(it.qty || 0);
+  return m;
+}
+
+// ---------- DB snapshots (shared across devices) ----------
+async function fetchSnapshot(orderId, kind) {
+  try {
+    const r = await supabase
+      .from("order_item_snapshots")
+      .select("product_id,qty")
+      .eq("order_id", orderId)
+      .eq("kind", kind)
+      .limit(5000);
+    if (r.error) return {};
+    const m = {};
+    for (const row of r.data || []) {
+      const pid = String(row.product_id ?? "");
+      const q = Number(row.qty ?? 0);
+      if (pid) m[pid] = Number.isFinite(q) ? q : 0;
+    }
+    return m;
+  } catch {
+    return {};
+  }
+}
+async function writeSnapshot(orderId, kind, map) {
+  try {
+    const rows = Object.entries(map || {}).map(([product_id, qty]) => ({
+      order_id: orderId,
+      kind,
+      product_id: String(product_id),
+      qty: Number(qty || 0),
+      updated_at: new Date().toISOString(),
+    }));
+
+    // Upsert current rows
+    if (rows.length) {
+      await supabase.from("order_item_snapshots").upsert(rows, {
+        onConflict: "order_id,kind,product_id",
+      });
+
+      // Delete removed rows (best-effort)
+      const ids = rows.map((r) => String(r.product_id));
+      const list = `(${ids.map((x) => `"${x.replace(/"/g, '\\"')}"`).join(",")})`;
+      await supabase
+        .from("order_item_snapshots")
+        .delete()
+        .eq("order_id", orderId)
+        .eq("kind", kind)
+        .not("product_id", "in", list);
+    } else {
+      // Nothing -> delete all snapshot rows for that kind
+      await supabase.from("order_item_snapshots").delete().eq("order_id", orderId).eq("kind", kind);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function computeTotal(items, productById) {
   let total = 0;
   let hasPrice = false;
@@ -326,10 +387,13 @@ export default function BecusHome() {
   const [products, setProducts] = useState([]);
   const [whats, setWhats] = useState({ phone: "", source: "none" });
 
+  // DB snapshots (shared) + local snapshots (fallback)
+  const [dbSnap, setDbSnap] = useState({ initial: null, last: null, ready: false, source: "db" });
+
   // For "Semaine dernière"
   const [prevOrder, setPrevOrder] = useState(null);
   const [prevItems, setPrevItems] = useState([]);
-  const [missing, setMissing] = useState({}); // product_id => true
+  const [missing, setMissing] = useState({});
   const [busy, setBusy] = useState(false);
 
   // UI
@@ -380,7 +444,6 @@ export default function BecusHome() {
   const orderStatus = useMemo(() => (order?.status || "draft").toString(), [order]);
   const isSent = useMemo(() => orderStatus === "sent" || !!order?.sent_at || !!order?.sentAt, [orderStatus, order]);
 
-  // Auto reduce initial block after send
   useEffect(() => {
     if (!mounted) return;
     if (isSent) setShowInitialDetails(false);
@@ -391,8 +454,8 @@ export default function BecusHome() {
   const itemsCount = useMemo(() => items.reduce((a, it) => a + Number(it.qty || 0), 0), [items]);
   const total = useMemo(() => computeTotal(items, productById), [items, productById]);
 
-  const initialSnap = useMemo(() => (deliveryISO ? loadSnap("initial", deliveryISO) : null), [deliveryISO]);
-  const lastSnap = useMemo(() => (deliveryISO ? loadSnap("last", deliveryISO) : null), [deliveryISO]);
+  const initialSnapLocal = useMemo(() => (deliveryISO ? loadSnap("initial", deliveryISO) : null), [deliveryISO]);
+  const lastSnapLocal = useMemo(() => (deliveryISO ? loadSnap("last", deliveryISO) : null), [deliveryISO]);
 
   const loadAll = useCallback(async () => {
     if (!deliveryISO) return;
@@ -407,6 +470,29 @@ export default function BecusHome() {
       const its = await loadItems(o.id);
       setItems(its);
 
+      const sent = (o?.status || "draft") === "sent" || !!o?.sent_at || !!o?.sentAt;
+
+      // Load shared snapshots if possible (so Ajout/Modification works on any device)
+      if (sent) {
+        const [ini, lst] = await Promise.all([fetchSnapshot(o.id, "initial"), fetchSnapshot(o.id, "last")]);
+
+        // If snapshot system is new and empty, auto-seed from current items (best-effort)
+        const curMap = mapFromItems(its);
+        const iniEmpty = !ini || !Object.keys(ini).length;
+        const lstEmpty = !lst || !Object.keys(lst).length;
+
+        if (iniEmpty && lstEmpty) {
+          await writeSnapshot(o.id, "initial", curMap);
+          await writeSnapshot(o.id, "last", curMap);
+          setDbSnap({ initial: curMap, last: curMap, ready: true, source: "seeded" });
+        } else {
+          setDbSnap({ initial: ini || {}, last: lst || {}, ready: true, source: "db" });
+        }
+      } else {
+        setDbSnap({ initial: null, last: null, ready: false, source: "none" });
+      }
+
+      // S-1
       if (afterThu08 && prevDeliveryISO) {
         const pr = await supabase
           .from("orders")
@@ -463,28 +549,58 @@ export default function BecusHome() {
     )}:${pad2(cutoff.getMinutes())}`;
   }, [cutoff]);
 
+  // --- Compute deltas: only show changes vs last snapshot (or initial snapshot)
   const computeDelta = useCallback(() => {
-    const base = lastSnap || initialSnap || {};
-    const cur = {};
-    for (const it of items) cur[String(it.product_id)] = Number(it.qty || 0);
+    const cur = mapFromItems(items);
+
+    // Base priority: DB last -> DB initial -> local last -> local initial -> empty
+    const baseDbLast = dbSnap?.last && Object.keys(dbSnap.last).length ? dbSnap.last : null;
+    const baseDbIni = dbSnap?.initial && Object.keys(dbSnap.initial).length ? dbSnap.initial : null;
+
+    const base = baseDbLast || baseDbIni || lastSnapLocal || initialSnapLocal || {};
 
     const allIds = new Set([...Object.keys(base || {}), ...Object.keys(cur)]);
     const add = [];
     const down = [];
+
+    // For WhatsApp text we also keep old/new
+    const downForMsg = [];
+    const addForMsg = [];
+
     for (const id of allIds) {
       const oldQty = Number(base?.[id] || 0);
       const newQty = Number(cur?.[id] || 0);
-      if (newQty > oldQty) add.push({ product_id: id, addQty: newQty - oldQty });
-      if (newQty < oldQty) down.push({ product_id: id, oldQty, newQty });
-    }
-    return { add, down, cur };
-  }, [items, lastSnap, initialSnap]);
+      const diff = newQty - oldQty;
 
-  const pendingDelta = useMemo(() => (isSent ? computeDelta() : { add: [], down: [], cur: {} }), [isSent, computeDelta]);
-  const hasPendingChanges = useMemo(
-    () => !!(pendingDelta?.add?.length || pendingDelta?.down?.length),
-    [pendingDelta?.add?.length, pendingDelta?.down?.length]
+      if (diff > 0) {
+        add.push({ product_id: id, diff });
+        addForMsg.push({ product_id: id, addQty: diff });
+      }
+      if (diff < 0) {
+        down.push({ product_id: id, diff });
+        downForMsg.push({ product_id: id, oldQty, newQty });
+      }
+    }
+
+    return {
+      add,
+      down,
+      cur,
+      addForMsg,
+      downForMsg,
+      baseSource: baseDbLast ? "db:last" : baseDbIni ? "db:initial" : lastSnapLocal ? "local:last" : initialSnapLocal ? "local:initial" : "none",
+    };
+  }, [items, dbSnap, lastSnapLocal, initialSnapLocal]);
+
+  const pendingDelta = useMemo(
+    () => (isSent ? computeDelta() : { add: [], down: [], cur: {}, addForMsg: [], downForMsg: [], baseSource: "none" }),
+    [isSent, computeDelta]
   );
+
+  const hasPendingChanges = useMemo(() => !!(pendingDelta?.add?.length || pendingDelta?.down?.length), [
+    pendingDelta?.add?.length,
+    pendingDelta?.down?.length,
+  ]);
 
   const whatsDisabledReason = useMemo(() => {
     if (!whats?.phone) return "Numéro WhatsApp manquant (appareil)";
@@ -508,15 +624,22 @@ export default function BecusHome() {
       await supabase.from("orders").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", order.id);
     } catch {}
 
-    const map = {};
-    for (const it of items) map[String(it.product_id)] = Number(it.qty || 0);
+    const map = mapFromItems(items);
+
+    // Local snapshots (fallback)
     saveSnap("initial", deliveryISO, map);
     saveSnap("last", deliveryISO, map);
+
+    // Shared snapshots (DB)
+    await writeSnapshot(order.id, "initial", map);
+    await writeSnapshot(order.id, "last", map);
 
     try {
       const r = await supabase.from("orders").select("*").eq("id", order.id).maybeSingle();
       if (!r.error && r.data) setOrder(r.data);
     } catch {}
+
+    setDbSnap({ initial: map, last: map, ready: true, source: "db" });
   }, [order?.id, canEdit, whats?.phone, items, deliveryISO, productById, isSent, order]);
 
   const sendDelta = useCallback(async () => {
@@ -525,22 +648,39 @@ export default function BecusHome() {
     if (!whats?.phone) return;
     if (!isSent) return;
 
-    const { add, down, cur } = computeDelta();
-    if (!add.length && !down.length) return;
+    const { addForMsg, downForMsg, cur } = pendingDelta || {};
+    if (!addForMsg?.length && !downForMsg?.length) return;
 
-    const text = buildDeltaText({ deliveryISO, deltaAdd: add, deltaDown: down, productById });
+    const text = buildDeltaText({ deliveryISO, deltaAdd: addForMsg, deltaDown: downForMsg, productById });
     window.open(waLink(whats.phone, text), "_blank");
-    saveSnap("last", deliveryISO, cur);
-  }, [order?.id, canEdit, whats?.phone, computeDelta, deliveryISO, productById, isSent]);
 
-  const resetBaselineToCurrent = useCallback(() => {
-    if (!deliveryISO) return;
-    const cur = {};
-    for (const it of items) cur[String(it.product_id)] = Number(it.qty || 0);
-    saveSnap("initial", deliveryISO, cur);
+    // Update "last" baseline so the delta list becomes empty after sending
     saveSnap("last", deliveryISO, cur);
-    alert("Référence enregistrée sur cet appareil.");
-  }, [deliveryISO, items]);
+    await writeSnapshot(order.id, "last", cur);
+    setDbSnap((prev) => ({ ...(prev || {}), last: cur, ready: true }));
+  }, [order?.id, canEdit, whats?.phone, deliveryISO, productById, isSent, pendingDelta]);
+
+  const resetBaselineToCurrent = useCallback(async () => {
+    if (!deliveryISO || !order?.id) return;
+    const cur = mapFromItems(items);
+
+    // Local
+    saveSnap("last", deliveryISO, cur);
+
+    // DB: always set last; set initial too only if missing
+    await writeSnapshot(order.id, "last", cur);
+
+    const ini = dbSnap?.initial && Object.keys(dbSnap.initial).length ? dbSnap.initial : null;
+    if (!ini) {
+      saveSnap("initial", deliveryISO, cur);
+      await writeSnapshot(order.id, "initial", cur);
+      setDbSnap({ initial: cur, last: cur, ready: true, source: "seeded" });
+    } else {
+      setDbSnap((prev) => ({ ...(prev || {}), last: cur, ready: true }));
+    }
+
+    alert("Référence (Ajout/Modification) synchronisée ✅");
+  }, [deliveryISO, order?.id, items, dbSnap?.initial]);
 
   const validateMissing = useCallback(async () => {
     if (!prevOrder?.id) return;
@@ -558,11 +698,8 @@ export default function BecusHome() {
     setBusy(true);
     setErr("");
     try {
-      const prevMap = {};
-      for (const it of prevItems) prevMap[String(it.product_id)] = Number(it.qty || 0);
-
-      const curMap = {};
-      for (const it of items) curMap[String(it.product_id)] = Number(it.qty || 0);
+      const prevMap = mapFromItems(prevItems);
+      const curMap = mapFromItems(items);
 
       for (const pid of ids) {
         const addQty = Number(prevMap[pid] || 0);
@@ -639,11 +776,16 @@ export default function BecusHome() {
 
           {showPhoneEditor ? (
             <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-              <input value={phoneDraft} onChange={(e) => setPhoneDraft(e.target.value)} placeholder="+33..." style={styles.input} />
+              <input
+                value={phoneDraft}
+                onChange={(e) => setPhoneDraft(e.target.value)}
+                placeholder="+33..."
+                style={styles.input}
+              />
               <button onClick={savePhoneLocal} style={{ ...styles.pillBtn, background: "#16a34a", color: "#fff" }}>
                 Enregistrer (appareil)
               </button>
-              <button onClick={() => setShowPhoneEditor(false)} style={{ ...styles.pillBtn }}>
+              <button onClick={() => setShowPhoneEditor(false)} style={styles.pillBtn}>
                 Annuler
               </button>
             </div>
@@ -666,7 +808,9 @@ export default function BecusHome() {
                 <span style={styles.datePill}> {deliveryISO ? isoToDDMMYYYY(deliveryISO) : ""}</span>
               </div>
               <div style={styles.smallMeta}>
-                {isSent ? "Envoyée. Pour modifier, utilise le bloc Ajout / Modification." : "Prépare la commande, puis envoie sur WhatsApp."}
+                {isSent
+                  ? "Envoyée. Pour modifier, utilise le bloc Ajout / Modification."
+                  : "Prépare la commande, puis envoie sur WhatsApp."}
               </div>
             </div>
 
@@ -685,7 +829,16 @@ export default function BecusHome() {
             </button>
           </div>
 
-          <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", justifyContent: "center" }}>
+          <div
+            style={{
+              marginTop: 10,
+              display: "flex",
+              gap: 12,
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
             <span style={styles.smallMeta}>
               Total articles : <strong>{itemsCount}</strong>
             </span>
@@ -765,9 +918,7 @@ export default function BecusHome() {
             </div>
 
             <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-              {!whatsEnabledDelta ? (
-                <div style={{ ...styles.smallMeta, color: "#b45309" }}>{whatsDisabledReason}</div>
-              ) : null}
+              {!whatsEnabledDelta ? <div style={{ ...styles.smallMeta, color: "#b45309" }}>{whatsDisabledReason}</div> : null}
 
               <div style={styles.smallMeta}>
                 1) Clique sur <strong>Modifier / Ajouter</strong> 2) Ajuste les quantités 3) Reviens ici 4) Envoie WhatsApp.
@@ -781,8 +932,10 @@ export default function BecusHome() {
                       pendingDelta.add.map((a) => (
                         <div key={`add_${a.product_id}`} style={styles.deltaRow}>
                           <span style={styles.deltaEmoji}>{productEmoji(productById[a.product_id]) || "📦"}</span>
-                          <span style={styles.deltaName}>{productName(productById[a.product_id])}</span>
-                          <span style={styles.qtyPill}>x{a.addQty}</span>
+                          <span style={styles.deltaName} title={productName(productById[a.product_id])}>
+                            {productName(productById[a.product_id])}
+                          </span>
+                          <span style={styles.qtyPill}>{`+${a.diff}`}</span>
                         </div>
                       ))
                     ) : (
@@ -796,10 +949,10 @@ export default function BecusHome() {
                       pendingDelta.down.map((d) => (
                         <div key={`down_${d.product_id}`} style={styles.deltaRow}>
                           <span style={styles.deltaEmoji}>{productEmoji(productById[d.product_id]) || "📦"}</span>
-                          <span style={styles.deltaName}>{productName(productById[d.product_id])}</span>
-                          <span style={styles.qtyPill}>
-                            {d.newQty <= 0 ? "Suppr." : `${d.oldQty}→${d.newQty}`}
+                          <span style={styles.deltaName} title={productName(productById[d.product_id])}>
+                            {productName(productById[d.product_id])}
                           </span>
+                          <span style={styles.qtyPill}>{`${d.diff}`}</span>
                         </div>
                       ))
                     ) : (
@@ -808,8 +961,12 @@ export default function BecusHome() {
                   </div>
                 </div>
               ) : (
-                <div style={styles.deltaHint}>Aucune modification pour le moment. Tu peux en faire via “Modifier / Ajouter”.</div>
+                <div style={styles.deltaHint}>Aucune modification pour le moment.</div>
               )}
+
+              <div style={styles.tinyNote}>
+                Base des modifications: <strong>{pendingDelta.baseSource}</strong>
+              </div>
             </div>
           </div>
         ) : null}
@@ -864,7 +1021,9 @@ export default function BecusHome() {
                         }}
                       />
                       <span style={{ width: 22, textAlign: "center" }}>{emoji}</span>
-                      <span style={styles.deltaName}>{name}</span>
+                      <span style={styles.deltaName} title={name}>
+                        {name}
+                      </span>
                       <span style={styles.qtyPill}>x{it.qty}</span>
                     </label>
                   );
@@ -935,7 +1094,8 @@ const styles = {
     minHeight: "100vh",
     background: "linear-gradient(180deg, #f8fafc, #ffffff)",
     padding: 14,
-    fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
+    fontFamily:
+      'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
     color: "#0f172a",
   },
   container: { maxWidth: 1280, margin: "0 auto" },
@@ -1040,7 +1200,12 @@ const styles = {
     fontWeight: 800,
     verticalAlign: "middle",
   },
-  whatsBtn: { padding: "10px 14px", borderRadius: 999, border: "1px solid rgba(15,23,42,0.12)", fontWeight: 900 },
+  whatsBtn: {
+    padding: "10px 14px",
+    borderRadius: 999,
+    border: "1px solid rgba(15,23,42,0.12)",
+    fontWeight: 900,
+  },
   summaryRow: {
     marginTop: 12,
     display: "grid",
@@ -1068,17 +1233,66 @@ const styles = {
     fontWeight: 950,
     fontSize: 12,
   },
-  input: { padding: "10px 12px", borderRadius: 14, border: "1px solid rgba(15,23,42,0.12)", minWidth: 240, outline: "none", fontWeight: 800 },
-  linkBtn: { border: "none", background: "transparent", color: "#0ea5e9", fontWeight: 900, cursor: "pointer", padding: 0, marginLeft: 8, textDecoration: "underline" },
-  missingRow: { display: "flex", gap: 10, alignItems: "center", padding: 10, borderRadius: 14, border: "1px solid rgba(15,23,42,0.08)", background: "rgba(15,23,42,0.02)", minWidth: 0 },
+  input: {
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(15,23,42,0.12)",
+    minWidth: 240,
+    outline: "none",
+    fontWeight: 800,
+  },
+  linkBtn: {
+    border: "none",
+    background: "transparent",
+    color: "#0ea5e9",
+    fontWeight: 900,
+    cursor: "pointer",
+    padding: 0,
+    marginLeft: 8,
+    textDecoration: "underline",
+  },
+  missingRow: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    padding: 10,
+    borderRadius: 14,
+    border: "1px solid rgba(15,23,42,0.08)",
+    background: "rgba(15,23,42,0.02)",
+    minWidth: 0,
+  },
   footer: { marginTop: 18, padding: 12, textAlign: "center", opacity: 0.7 },
 
   deltaGrid: { display: "grid", gap: 12, gridTemplateColumns: "repeat(2, minmax(0, 1fr))" },
-  deltaBox: { borderRadius: 16, border: "1px solid rgba(15,23,42,0.10)", background: "rgba(255,255,255,0.75)", padding: 12, minWidth: 0, overflow: "hidden" },
+  deltaBox: {
+    borderRadius: 16,
+    border: "1px solid rgba(15,23,42,0.10)",
+    background: "rgba(255,255,255,0.75)",
+    padding: 12,
+    minWidth: 0,
+    overflow: "hidden",
+  },
   deltaTitle: { fontWeight: 950, marginBottom: 8 },
-  deltaRow: { display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 12, border: "1px solid rgba(15,23,42,0.08)", background: "rgba(15,23,42,0.02)", minWidth: 0 },
+  deltaRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "8px 10px",
+    borderRadius: 12,
+    border: "1px solid rgba(15,23,42,0.08)",
+    background: "rgba(15,23,42,0.02)",
+    minWidth: 0,
+  },
   deltaEmoji: { width: 22, textAlign: "center" },
-  deltaName: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 800 },
+  deltaName: {
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    fontWeight: 800,
+  },
   deltaEmpty: { opacity: 0.6, fontWeight: 700 },
   deltaHint: { opacity: 0.8, fontWeight: 750 },
+  tinyNote: { fontSize: 11, opacity: 0.6, fontWeight: 700 },
 };

@@ -1,11 +1,22 @@
-// pages/login.js — connexion email + mot de passe
-import { useState } from "react";
+// pages/login.js — connexion email + mot de passe + redirection "next"
+import { useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/router";
 import { supabase } from "../lib/supabaseClient";
 import { useAuth } from "../lib/useAuth";
 
+function safeNextPath(x) {
+  const s = (x ?? "").toString().trim();
+  if (s.startsWith("/") && !s.startsWith("//")) return s;
+  return "/";
+}
+
 export default function LoginPage() {
+  const router = useRouter();
   const { session, user, signOut } = useAuth();
+
+  const nextPath = useMemo(() => safeNextPath(router.query?.next), [router.query]);
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [msg, setMsg] = useState("");
@@ -13,53 +24,122 @@ export default function LoginPage() {
 
   const onLogin = async (e) => {
     e.preventDefault();
-    setMsg(""); setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    setMsg("");
+    setLoading(true);
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+
     setLoading(false);
-    setMsg(error ? ("Erreur: " + error.message) : "Connecté ✅");
+
+    if (error) {
+      setMsg("Erreur: " + error.message);
+      return;
+    }
+
+    setMsg("Connecté ✅");
+    router.replace(nextPath);
+  };
+
+  const onLogout = async () => {
+    setMsg("");
+    await signOut();
+    router.replace("/login");
   };
 
   return (
-    <div style={{ maxWidth: 520, margin: "0 auto", padding: 16, fontFamily: "system-ui" }}>
-      <div style={{ marginBottom: 12 }}>
-        <Link href="/" style={{ textDecoration: "underline" }}>← Accueil</Link>
+    <div
+      style={{
+        maxWidth: 520,
+        margin: "0 auto",
+        padding: 16,
+        fontFamily:
+          'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
+      }}
+    >
+      <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", gap: 10 }}>
+        <Link href="/" style={{ textDecoration: "underline", fontWeight: 800 }}>
+          ← Accueil
+        </Link>
+        <span style={{ color: "rgba(15,23,42,0.55)", fontWeight: 800, fontSize: 13 }}>
+          Retour après login: <b>{nextPath}</b>
+        </span>
       </div>
-      <h1 style={{ fontSize: 22, fontWeight: 800, marginBottom: 12 }}>Connexion</h1>
+
+      <h1 style={{ fontSize: 22, fontWeight: 900, marginBottom: 12 }}>Connexion</h1>
 
       {session ? (
-        <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-          <p>Connecté en tant que <b>{user?.email}</b></p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Link href="/products" style={{ textDecoration: "underline" }}>Aller aux produits</Link>
-            <button onClick={signOut} style={btn}>Se déconnecter</button>
+        <div style={card}>
+          <p style={{ marginTop: 0 }}>
+            Connecté en tant que <b>{user?.email}</b>
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => router.replace(nextPath)} style={btn}>
+              Continuer
+            </button>
+            <button onClick={onLogout} style={{ ...btn, background: "#fff", color: "#0ea5e9" }}>
+              Se déconnecter
+            </button>
           </div>
         </div>
       ) : (
-        <form onSubmit={onLogin} style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-          <label style={{ display: "block", marginBottom: 6 }}>Email</label>
+        <form onSubmit={onLogin} style={card}>
+          <label style={{ display: "block", marginBottom: 6, fontWeight: 800 }}>Email</label>
           <input
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="email"
             type="email"
             style={inp}
+            autoComplete="email"
           />
-          <label style={{ display: "block", margin: "8px 0 6px" }}>Mot de passe</label>
+
+          <label style={{ display: "block", margin: "10px 0 6px", fontWeight: 800 }}>
+            Mot de passe
+          </label>
           <input
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="mot de passe"
             type="password"
             style={inp}
+            autoComplete="current-password"
           />
-          <button type="submit" disabled={loading} style={btn}>
+
+          <button type="submit" disabled={loading} style={{ ...btn, opacity: loading ? 0.8 : 1 }}>
             {loading ? "Connexion..." : "Se connecter"}
           </button>
-          {msg && <div style={{ marginTop: 10 }}>{msg}</div>}
+
+          {msg && <div style={{ marginTop: 10, fontWeight: 800 }}>{msg}</div>}
         </form>
       )}
     </div>
   );
 }
-const inp = { width: "100%", padding: 10, border: "1px solid #ddd", borderRadius: 8 };
-const btn = { padding: "10px 12px", borderRadius: 10, border: "1px solid #0ea5e9", background: "#0ea5e9", color: "#fff", cursor: "pointer", fontWeight: 700 };
+
+const card = {
+  border: "1px solid rgba(15,23,42,0.10)",
+  borderRadius: 14,
+  padding: 14,
+  background: "#fff",
+  boxShadow: "0 10px 26px rgba(15,23,42,0.08)",
+};
+const inp = {
+  width: "100%",
+  padding: 11,
+  border: "1px solid rgba(15,23,42,0.18)",
+  borderRadius: 10,
+  outline: "none",
+  fontWeight: 800,
+};
+const btn = {
+  padding: "10px 12px",
+  borderRadius: 12,
+  border: "1px solid #0ea5e9",
+  background: "#0ea5e9",
+  color: "#fff",
+  cursor: "pointer",
+  fontWeight: 900,
+};

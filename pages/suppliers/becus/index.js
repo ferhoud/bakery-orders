@@ -7,40 +7,39 @@ import { supabase } from "../../../lib/supabaseClient";
 const SUPPLIER_KEY = "becus";
 
 // ---------- WhatsApp (fallback tablette) ----------
-// WhatsApp wa.me attend un numéro en format international SANS "+" et SANS espaces.
-// Ex: +33 6 12 34 56 78 => 33612345678
+// wa.me attend un numéro international SANS "+" et SANS espaces (ex: 33612345678)
+const LS_WA_PHONE = "bakery_orders_whatsapp_phone_becus";
+const LS_WA_NAME = "bakery_orders_whatsapp_name_becus";
+
 function normalizeWhatsAppPhone(raw) {
-  const digits = (raw ?? "").toString().replace(/[^0-9]/g, "");
+  const s = (raw ?? "").toString().trim();
+  if (!s) return "";
+  // garder uniquement les chiffres
+  let digits = s.replace(/\D/g, "");
+  // Si l'utilisateur a tapé 06..., on force en +33 si possible (France) ? -> non, on ne devine pas.
   return digits;
-}
-function localWaKeyPhone() {
-  return `wa_phone_${SUPPLIER_KEY}`;
-}
-function localWaKeyName() {
-  return `wa_name_${SUPPLIER_KEY}`;
 }
 function readLocalWhatsApp() {
   if (typeof window === "undefined") return null;
   try {
-    const p = window.localStorage.getItem(localWaKeyPhone()) || "";
-    const n = window.localStorage.getItem(localWaKeyName()) || "";
+    const p = window.localStorage.getItem(LS_WA_PHONE) || "";
+    const n = window.localStorage.getItem(LS_WA_NAME) || "";
     const phone = normalizeWhatsAppPhone(p);
     if (phone) return { phone, name: n || "Bécus" };
   } catch {}
-  return readLocalWhatsApp() || { phone: "", name: "Bécus" };
+  return null;
 }
-function writeLocalWhatsApp(phoneRaw, nameRaw) {
+function writeLocalWhatsApp(phone, name) {
   if (typeof window === "undefined") return;
   try {
-    const phone = normalizeWhatsAppPhone(phoneRaw);
-    if (phone) window.localStorage.setItem(localWaKeyPhone(), phone);
-    else window.localStorage.removeItem(localWaKeyPhone());
-    const n = (nameRaw ?? "").toString().trim();
-    if (n) window.localStorage.setItem(localWaKeyName(), n);
-    else window.localStorage.removeItem(localWaKeyName());
+    const p = normalizeWhatsAppPhone(phone);
+    const n = (name ?? "").toString();
+    if (p) window.localStorage.setItem(LS_WA_PHONE, p);
+    else window.localStorage.removeItem(LS_WA_PHONE);
+    if (n) window.localStorage.setItem(LS_WA_NAME, n);
+    else window.localStorage.removeItem(LS_WA_NAME);
   } catch {}
 }
-
 
 // ---------- Dates (Bécus = Jeudi) ----------
 function pad2(n) {
@@ -180,6 +179,8 @@ async function getSupplierWhatsApp() {
           "";
         const name = row.name || row.display_name || row.label || "Bécus";
         if (phone) return { phone: phone.toString(), name };
+        const local = readLocalWhatsApp();
+        if (local?.phone) return { phone: local.phone, name: local.name || name || "Bécus" };
         return { phone: "", name };
       }
     } catch (_) {}
@@ -210,7 +211,7 @@ async function findOrderByDate(deliveryISO) {
       if (error && /Could not find/i.test(error.message || "")) continue;
     } catch (_) {}
   }
-  return readLocalWhatsApp() || { phone: "", name: "Bécus" };
+  return null;
 }
 
 async function listOrdersForHistory(limit = 80) {
@@ -451,51 +452,6 @@ const styles = {
     fontWeight: 900,
     fontSize: 12,
   },
-  pillBtnWAOn: {
-    background: "#16a34a",
-    borderColor: "#16a34a",
-    color: "#ffffff",
-  },
-  pillBtnWAOff: {
-    background: "#f3f4f6",
-    borderColor: "rgba(15,23,42,0.14)",
-    color: "#64748b",
-  },
-  waSetup: {
-    marginTop: 10,
-    padding: 12,
-    borderRadius: 12,
-    border: "1px dashed rgba(15,23,42,0.22)",
-    background: "rgba(255,255,255,0.85)",
-  },
-  waInput: {
-    minWidth: 220,
-    flex: "1 1 220px",
-    padding: 10,
-    borderRadius: 10,
-    border: "1px solid rgba(15,23,42,0.18)",
-    fontWeight: 900,
-    outline: "none",
-  },
-  waSaveBtn: {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid #0ea5e9",
-    background: "#0ea5e9",
-    color: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
-  },
-  waClearBtn: {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(15,23,42,0.18)",
-    background: "#fff",
-    color: "#0f172a",
-    fontWeight: 900,
-    cursor: "pointer",
-  },
-
 };
 
 function useMounted() {
@@ -521,6 +477,15 @@ export default function BecusHome() {
   const [prevItems, setPrevItems] = useState([]);
   const [history, setHistory] = useState([]);
   const [wa, setWa] = useState({ phone: "", name: "Bécus" });
+  const [waDraft, setWaDraft] = useState("");
+
+  const hasItems = useMemo(() => {
+    const arr = items || [];
+    return arr.some((x) => Number(x.qty ?? x.quantity ?? 0) > 0);
+  }, [items]);
+
+  const waPhoneNorm = useMemo(() => normalizeWhatsAppPhone(wa?.phone || ""), [wa]);
+  const canSendWhatsApp = !!(hasItems && waPhoneNorm);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -680,12 +645,16 @@ export default function BecusHome() {
         setErrorText("Numéro WhatsApp manquant. Renseigne-le ci-dessous (sur cette tablette) puis réessaie.");
         return;
       }
+      if (!hasItems) {
+        setErrorText("Ajoute au moins un produit avant d’envoyer WhatsApp.");
+        return;
+      }
       const url = `https://wa.me/${encodeURIComponent(phone)}?text=${encodeURIComponent(text)}`;
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (e) {
       setErrorText((e?.message || "Envoi WhatsApp impossible.").toString());
     }
-  }, [wa, deliveryISO, items, productById]);
+  }, [wa, deliveryISO, items, productById, hasItems]);
 
   if (!mounted) return null;
 
@@ -703,23 +672,9 @@ export default function BecusHome() {
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
             <button onClick={openCatalogue} style={{ ...styles.pillBtn, ...styles.pillBtnPrimary }}>
-              📦 Catalogue
+              📦 Produits Bécus
             </button>
-            <button
-              onClick={sendWhatsApp}
-              disabled={!canSendWhatsApp}
-              style={{
-                ...styles.pillBtn,
-                ...(canSendWhatsApp ? styles.pillBtnWAOn : styles.pillBtnWAOff),
-                opacity: canSendWhatsApp ? 1 : 0.75,
-                cursor: canSendWhatsApp ? "pointer" : "not-allowed",
-              }}
-              title={!canSendWhatsApp ? "WhatsApp inactif: numéro ou produits manquants" : "Envoyer via WhatsApp"}
-            >
-              💬 Envoyer WhatsApp
-            </button>
-            <Link href="/admin" style={styles.pillLink}>🛠️ Admin</Link>
-          </div>
+</div>
         </div>
 
         <div style={styles.banner}>
@@ -730,7 +685,7 @@ export default function BecusHome() {
             <span style={{ ...styles.smallMeta, color: "#b91c1c" }}>{errorText}</span>
           ) : null}
 
-          {!normalizeWhatsAppPhone(wa?.phone || "") ? (
+          {!waPhoneNorm ? (
             <div style={styles.waSetup}>
               <div style={{ fontWeight: 900, marginBottom: 6 }}>
                 📌 Numéro WhatsApp Bécus non configuré (sur cette tablette)
@@ -771,7 +726,7 @@ export default function BecusHome() {
                 </button>
               </div>
               <div style={styles.smallMeta}>
-                Astuce: on enlève automatiquement espaces et “+”. Format final = 33612345678.
+                Astuce: format final = 33612345678 (sans espaces ni +).
               </div>
             </div>
           ) : null}
@@ -780,11 +735,32 @@ export default function BecusHome() {
         {/* 1) Commande en cours */}
         <div style={styles.card}>
           <div style={styles.cardTitleRow}>
-            <div>
+            <button
+              onClick={openCatalogue}
+              style={{ ...styles.pillBtn, ...styles.addBtn }}
+              title="Ajouter des produits à la commande en cours"
+            >
+              ➕ Ajouter Produits
+            </button>
+
+            <div style={styles.cardTitleCenter}>
               <h2 style={styles.cardTitle}>Commande en cours</h2>
               <div style={styles.cardDate}>{deliveryISO.split("-").reverse().join("/")}</div>
             </div>
-            <button onClick={openCatalogue} style={styles.pillBtn}>Modifier / Voir</button>
+
+            <button
+              onClick={sendWhatsApp}
+              disabled={!canSendWhatsApp}
+              style={{
+                ...styles.pillBtn,
+                ...(canSendWhatsApp ? styles.waBtnOn : styles.waBtnOff),
+                opacity: canSendWhatsApp ? 1 : 0.75,
+                cursor: canSendWhatsApp ? "pointer" : "not-allowed",
+              }}
+              title={!canSendWhatsApp ? "WhatsApp inactif: numéro ou produits manquants" : "Envoyer via WhatsApp"}
+            >
+              💬 Envoyer WhatsApp
+            </button>
           </div>
 
           <div style={styles.familyGrid}>
@@ -930,14 +906,4 @@ export default function BecusHome() {
       `}</style>
     </div>
   );
-
-  const hasItems = useMemo(() => {
-    const arr = items || [];
-    return arr.some((x) => {
-      const q = Number(x.qty ?? x.quantity ?? 0);
-      return q > 0;
-    });
-  }, [items]);
-
-  const canSendWhatsApp = !!(hasItems && normalizeWhatsAppPhone(wa?.phone || ""));
 }

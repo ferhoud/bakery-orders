@@ -1,43 +1,30 @@
 // pages/suppliers/becus/order.js
-import { useEffect, useMemo, useCallback, useRef, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { supabase } from "../../../lib/supabaseClient";
 
-/**
- * BECUS ORDER — RESTORED CLEAN LAYOUT (NO 3 family columns)
- * - Catalogue: public.products (supplier_key='becus') grouped/filtered by dept
- * - Order: public.orders + public.order_items (NO orders.content/selected/etc)
- * - UI: left catalogue (single list) + right summary (by family)
- */
-
-const SUPPLIER = { key: "becus", label: "Bécus", icon: "🥖" };
-
-const ORDER_TABLE = "orders";
-const ITEMS_TABLE = "order_items";
-const PRODUCTS_TABLE = "products";
-
-const FAMILY_TABS = ["TOUS", "Vente", "Boulanger", "Pâtissier"];
+const SUPPLIER_KEY = "becus";
+const SUPPLIER_NAME = "Bécus";
 const QTY_MAX = 20;
 
+// ---------- Date helpers ----------
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
 function toISODate(d) {
-  const dd = new Date(d);
-  dd.setHours(0, 0, 0, 0);
-  return `${dd.getFullYear()}-${pad2(dd.getMonth() + 1)}-${pad2(dd.getDate())}`;
+  const dt = new Date(d);
+  dt.setHours(0, 0, 0, 0);
+  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
 }
-function frDate(iso) {
-  try {
-    return new Intl.DateTimeFormat("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(iso));
-  } catch {
-    return iso;
-  }
+function isoToFR(iso) {
+  if (!iso) return "";
+  const [y, m, d] = iso.split("-");
+  return `${d}/${m}/${y}`;
 }
-function getBecusDeliveryISO(now) {
+function getBecusDeliveryISO(now = new Date()) {
   // Delivery day = Thursday.
-  // Switch to next delivery after Thursday 08:00 (so after delivery we prepare next week).
+  // Switch to next delivery after Thursday 08:00.
   const n = new Date(now);
   const day = n.getDay(); // 0 Sun ... 4 Thu
   const base = new Date(n);
@@ -46,109 +33,78 @@ function getBecusDeliveryISO(now) {
   const daysUntilThu = (4 - day + 7) % 7;
   base.setDate(base.getDate() + daysUntilThu); // this week's Thu (or today if Thu)
 
-  if (day === 4 && n.getHours() >= 8) {
-    base.setDate(base.getDate() + 7);
-  }
+  if (day === 4 && n.getHours() >= 8) base.setDate(base.getDate() + 7);
   return toISODate(base);
 }
-
-function getCutoffForDelivery(deliveryISO) {
+function getCutoffForDeliveryISO(deliveryISO) {
+  // Wednesday 12:00 (day before Thursday delivery)
   const d = new Date(deliveryISO + "T00:00:00");
-  d.setHours(12, 0, 0, 0);
   d.setDate(d.getDate() - 1);
+  d.setHours(12, 0, 0, 0);
   return d;
 }
-function clampQty(q) {
-  const n = Number(q);
-  if (!Number.isFinite(n) || n < 0) return 0;
-  if (n > QTY_MAX) return QTY_MAX;
-  return n;
+
+// ---------- Product helpers ----------
+function normDept(x) {
+  const s = (x ?? "").toString().trim().toLowerCase();
+  if (!s) return "vente";
+  if (s.startsWith("patis") || s.startsWith("pâtis")) return "patiss";
+  if (s.startsWith("boul")) return "boulanger";
+  if (s.startsWith("vent")) return "vente";
+  return s;
 }
-function normDept(raw) {
-  const s = String(raw || "").trim().toLowerCase();
-  if (s.includes("boul")) return "Boulanger";
-  if (s.includes("patis") || s.includes("pât")) return "Pâtissier";
-  if (s.includes("vente")) return "Vente";
+function deptLabel(dept) {
+  const d = normDept(dept);
+  if (d === "boulanger") return "Boulanger";
+  if (d === "patiss") return "Pâtissier";
   return "Vente";
 }
-function pickName(p) {
-  return p?.name ?? p?.label ?? p?.title ?? p?.designation ?? p?.libelle ?? p?.sku ?? p?.id;
+function productName(p) {
+  return (
+    p?.name ||
+    p?.title ||
+    p?.label ||
+    p?.designation ||
+    p?.description ||
+    p?.ref ||
+    p?.code ||
+    p?.id ||
+    "Produit"
+  ).toString();
 }
-function pickEmoji(p) {
-  return p?.emoji ?? p?.icon ?? "📦";
-}
-function pickImage(p) {
-  const keys = ["photo_url", "image_url", "img_url", "thumbnail_url", "thumb_url", "photo", "image", "picture", "img"];
-  for (const k of keys) {
-    const v = p?.[k];
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-  return null;
+function productEmoji(p) {
+  return (p?.emoji || p?.icon || "").toString();
 }
 
+// ---------- Supabase helpers ----------
 async function getOrCreateOrder(deliveryISO) {
   const r = await supabase
-    .from(ORDER_TABLE)
+    .from("orders")
     .select("*")
-    .eq("supplier_key", SUPPLIER.key)
+    .eq("supplier_key", SUPPLIER_KEY)
     .eq("delivery_date", deliveryISO)
     .maybeSingle();
   if (!r.error && r.data) return r.data;
 
   const ins = await supabase
-    .from(ORDER_TABLE)
-    .insert({ supplier_key: SUPPLIER.key, delivery_date: deliveryISO, status: "draft" })
+    .from("orders")
+    .insert({ supplier_key: SUPPLIER_KEY, delivery_date: deliveryISO, status: "draft" })
     .select("*")
     .maybeSingle();
-  if (!ins.error && ins.data) return ins.data;
-
-  const rr = await supabase
-    .from(ORDER_TABLE)
-    .select("*")
-    .eq("supplier_key", SUPPLIER.key)
-    .eq("delivery_date", deliveryISO)
-    .maybeSingle();
-  if (!rr.error && rr.data) return rr.data;
-
-  throw new Error(ins.error?.message || r.error?.message || "Impossible de créer/charger la commande");
+  if (ins.error) throw ins.error;
+  return ins.data;
 }
 
-async function loadProducts() {
-  const r = await supabase
-    .from(PRODUCTS_TABLE)
-    .select("*")
-    .eq("supplier_key", SUPPLIER.key)
-    .order("dept", { ascending: true })
-    .order("name", { ascending: true })
-    .limit(5000);
+async function loadItemsMap(orderId) {
+  const r = await supabase.from("order_items").select("*").eq("order_id", orderId).limit(5000);
   if (r.error) throw r.error;
-
-  const list = [];
-  const map = new Map();
-  for (const p of r.data || []) {
-    const obj = {
-      id: String(p.id),
-      name: String(pickName(p) || p.id),
-      dept: normDept(p.dept),
-      emoji: pickEmoji(p),
-      image: pickImage(p),
-    };
-    list.push(obj);
-    map.set(obj.id, obj);
-  }
-  return { list, map };
-}
-
-async function loadItems(orderId) {
-  const r = await supabase.from(ITEMS_TABLE).select("*").eq("order_id", orderId).limit(5000);
-  if (r.error) throw r.error;
-  const m = new Map();
+  const map = {};
   for (const it of r.data || []) {
-    const pid = String(it.product_id ?? it.productId ?? it.product_uuid ?? it.product ?? "");
-    const qty = Number(it.qty ?? it.quantity ?? it.count ?? it.qte ?? 0);
-    if (pid && qty > 0) m.set(pid, qty);
+    const pid = String(it.product_id ?? it.productId ?? "");
+    const qty = Number(it.qty ?? it.quantity ?? 0);
+    if (pid && Number.isFinite(qty) && qty > 0) map[pid] = qty;
   }
-  return m;
+  return map;
 }
 
 async function setItemQty(orderId, productId, qty) {
@@ -156,531 +112,459 @@ async function setItemQty(orderId, productId, qty) {
   if (!Number.isFinite(q) || q < 0) return;
 
   if (q <= 0) {
-    const del = await supabase.from(ITEMS_TABLE).delete().eq("order_id", orderId).eq("product_id", productId);
+    const del = await supabase.from("order_items").delete().eq("order_id", orderId).eq("product_id", productId);
     if (!del.error) return;
-    await supabase.from(ITEMS_TABLE).delete().eq("order_id", orderId).eq("productId", productId);
+    await supabase.from("order_items").delete().eq("order_id", orderId).eq("productId", productId);
     return;
   }
 
   const payload = { order_id: orderId, product_id: productId, qty: q };
-  const up = await supabase.from(ITEMS_TABLE).upsert(payload, { onConflict: "order_id,product_id" });
+  const up = await supabase.from("order_items").upsert(payload, { onConflict: "order_id,product_id" });
   if (!up.error) return;
 
-  await supabase.from(ITEMS_TABLE).delete().eq("order_id", orderId).eq("product_id", productId);
-  const ins = await supabase.from(ITEMS_TABLE).insert(payload);
+  // fallback
+  await supabase.from("order_items").delete().eq("order_id", orderId).eq("product_id", productId);
+  const ins = await supabase.from("order_items").insert(payload);
   if (ins.error) throw ins.error;
 }
 
-function groupSelected(selectedItems) {
-  const by = { Vente: [], Boulanger: [], Pâtissier: [] };
-  for (const it of selectedItems) {
-    if (it.dept === "Boulanger") by.Boulanger.push(it);
-    else if (it.dept === "Pâtissier") by.Pâtissier.push(it);
-    else by.Vente.push(it);
-  }
-  return by;
-}
-
+// ---------- Page ----------
 export default function BecusOrderPage() {
   const router = useRouter();
-  const [now, setNow] = useState(null);
+  const [mounted, setMounted] = useState(false);
+  const [now, setNow] = useState(() => new Date());
+
+  // IMPORTANT: compute deliveryISO safely for SSR/build
+  const dateParam = useMemo(() => (router.query?.date || "").toString(), [router.query]);
+  const deliveryISO = useMemo(() => {
+    if (dateParam) return dateParam;
+    // avoid SSR surprises: if not mounted yet, return empty and fill after mount
+    if (!mounted) return "";
+    return getBecusDeliveryISO(now);
+  }, [dateParam, mounted, now]);
+
+  const cutoff = useMemo(() => (deliveryISO ? getCutoffForDeliveryISO(deliveryISO) : null), [deliveryISO]);
+  const isBeforeCutoff = useMemo(() => {
+    if (!cutoff) return true;
+    return now.getTime() <= cutoff.getTime();
+  }, [now, cutoff]);
 
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  const [familyFilter, setFamilyFilter] = useState("TOUS");
-  const [search, setSearch] = useState("");
+  const [errorText, setErrorText] = useState("");
 
   const [order, setOrder] = useState(null);
   const [products, setProducts] = useState([]);
-  const [productsMap, setProductsMap] = useState(new Map());
-  const [itemsMap, setItemsMap] = useState(new Map());
+  const [selected, setSelected] = useState({}); // { productId: qty }
+  const [saving, setSaving] = useState(false);
 
-  const saveTimer = useRef(null);
+  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 15_000);
+    return () => clearInterval(t);
+  }, []);
 
-  useEffect(() => setNow(new Date()), []);
-
-  const deliveryISO = useMemo(() => {
-    const q = router.query?.date;
-    if (typeof q === "string" && /^\d{4}-\d{2}-\d{2}$/.test(q)) return q;
-    return now ? getBecusDeliveryISO(now) : null;
-  }, [router.query, now]);
-
-  const cutoff = useMemo(() => (deliveryISO ? getCutoffForDelivery(deliveryISO) : null), [deliveryISO]);
-  const isBeforeCutoff = useMemo(() => (now && cutoff ? now.getTime() <= cutoff.getTime() : true), [now, cutoff]);
-
+  // These must be defined BEFORE callbacks that use them in dependency arrays
   const orderStatus = useMemo(() => (order?.status || order?.state || "draft").toString(), [order]);
 
   const canEdit = useMemo(() => {
     if (orderStatus === "archived") return false;
-    // Allowed until cutoff (draft or sent). After cutoff => locked.
+    // For Bécus: edits/ajouts allowed until cutoff, regardless of sent/draft
     return !!isBeforeCutoff;
   }, [orderStatus, isBeforeCutoff]);
 
-  const reload = useCallback(async () => {
+  const load = useCallback(async () => {
     if (!deliveryISO) return;
     setLoading(true);
-    setError("");
-
+    setErrorText("");
     try {
+      const { data: prodData, error: prodErr } = await supabase
+        .from("products")
+        .select("*")
+        .eq("supplier_key", SUPPLIER_KEY)
+        .order("dept", { ascending: true });
+      if (prodErr) throw prodErr;
+      setProducts(prodData || []);
+
       const o = await getOrCreateOrder(deliveryISO);
       setOrder(o);
 
-      const { list, map } = await loadProducts();
-      setProducts(list);
-      setProductsMap(map);
-
-      const im = await loadItems(o.id);
-      setItemsMap(im);
+      const map = await loadItemsMap(o.id);
+      setSelected(map);
     } catch (e) {
-      setError(String(e?.message || e));
+      setErrorText((e?.message || "Erreur de chargement.").toString());
     } finally {
       setLoading(false);
     }
   }, [deliveryISO]);
 
   useEffect(() => {
+    // avoid running on SSR/build with empty date
+    if (!mounted) return;
+    if (!router.isReady) return;
     if (!deliveryISO) return;
-    reload();
-  }, [deliveryISO, reload]);
+    load();
+  }, [mounted, router.isReady, deliveryISO, load]);
 
+  const [q, setQ] = useState("");
   const filteredProducts = useMemo(() => {
-    let list = products || [];
-    if (familyFilter !== "TOUS") {
-      list = list.filter((p) => p.dept === familyFilter);
-    }
-    const s = String(search || "").trim().toLowerCase();
-    if (s) {
-      list = list.filter((p) => p.name.toLowerCase().includes(s));
-    }
-    return list;
-  }, [products, familyFilter, search]);
+    const qq = (q || "").toLowerCase().trim();
+    if (!qq) return products || [];
+    return (products || []).filter((p) => productName(p).toLowerCase().includes(qq));
+  }, [q, products]);
 
-  const selectedItems = useMemo(() => {
-    const out = [];
-    for (const [pid, qty] of itemsMap.entries()) {
-      const p = productsMap.get(pid);
-      out.push({
-        id: pid,
-        qty,
-        name: p?.name || pid,
-        dept: p?.dept || "Vente",
-        emoji: p?.emoji || "📦",
-        image: p?.image || null,
-      });
-    }
-    out.sort((a, b) => a.name.localeCompare(b.name, "fr"));
-    return out;
-  }, [itemsMap, productsMap]);
+  const deptTabs = useMemo(() => ["vente", "boulanger", "patiss"], []);
+  const [dept, setDept] = useState("vente");
 
-  const grouped = useMemo(() => groupSelected(selectedItems), [selectedItems]);
+  const visibleProducts = useMemo(() => {
+    return filteredProducts.filter((p) => normDept(p.dept) === dept);
+  }, [filteredProducts, dept]);
 
   const toggleChecked = useCallback(
-    (pid) => {
+    async (pid) => {
       if (!order?.id) return;
-      
-      if (!canEdit) return;const cur = itemsMap.get(pid) || 0;
-      const next = cur > 0 ? 0 : 1;
-      // optimistic
-      setItemsMap((prev) => {
-        const m = new Map(prev);
-        if (next <= 0) m.delete(pid);
-        else m.set(pid, next);
-        return m;
-      });
+      if (!canEdit) return;
 
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(async () => {
-        setSaving(true);
-        try {
-          await setItemQty(order.id, pid, next);
-        } catch (e) {
-          setError(String(e?.message || e));
-          // refetch
-          const im = await loadItems(order.id);
-          setItemsMap(im);
-        } finally {
-          setSaving(false);
-        }
-      }, 150);
+      const id = String(pid);
+      const cur = Number(selected?.[id] ?? 0);
+      const next = cur > 0 ? 0 : 1;
+
+      setSelected((prev) => ({ ...prev, [id]: next }));
+      setSaving(true);
+      try {
+        await setItemQty(order.id, id, next);
+      } catch (e) {
+        setErrorText((e?.message || "Erreur de sauvegarde").toString());
+      } finally {
+        setSaving(false);
+      }
     },
-    [order, itemsMap]
+    [order?.id, canEdit, selected]
   );
 
   const incQty = useCallback(
-    (pid) => {
+    async (pid) => {
       if (!order?.id) return;
-      
-      if (!canEdit) return;const cur = clampQty(itemsMap.get(pid) || 0);
-      const next = Math.min(QTY_MAX, Math.max(1, cur + 1));
+      if (!canEdit) return;
 
-      setItemsMap((prev) => {
-        const m = new Map(prev);
-        m.set(pid, next);
-        return m;
-      });
+      const id = String(pid);
+      const cur = Number(selected?.[id] ?? 0);
+      const next = Math.min(QTY_MAX, cur + 1);
 
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(async () => {
-        setSaving(true);
-        try {
-          await setItemQty(order.id, pid, next);
-        } catch (e) {
-          setError(String(e?.message || e));
-          const im = await loadItems(order.id);
-          setItemsMap(im);
-        } finally {
-          setSaving(false);
-        }
-      }, 150);
+      setSelected((prev) => ({ ...prev, [id]: next }));
+      setSaving(true);
+      try {
+        await setItemQty(order.id, id, next);
+      } catch (e) {
+        setErrorText((e?.message || "Erreur de sauvegarde").toString());
+      } finally {
+        setSaving(false);
+      }
     },
-    [order, itemsMap]
+    [order?.id, canEdit, selected]
   );
 
   const decQty = useCallback(
-    (pid) => {
+    async (pid) => {
       if (!order?.id) return;
-      
-      if (!canEdit) return;const cur = clampQty(itemsMap.get(pid) || 0);
-      const next = cur - 1;
+      if (!canEdit) return;
 
-      setItemsMap((prev) => {
-        const m = new Map(prev);
-        if (next <= 0) m.delete(pid);
-        else m.set(pid, next);
-        return m;
-      });
+      const id = String(pid);
+      const cur = Number(selected?.[id] ?? 0);
+      const next = Math.max(0, cur - 1);
 
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(async () => {
-        setSaving(true);
-        try {
-          await setItemQty(order.id, pid, next);
-        } catch (e) {
-          setError(String(e?.message || e));
-          const im = await loadItems(order.id);
-          setItemsMap(im);
-        } finally {
-          setSaving(false);
-        }
-      }, 150);
+      setSelected((prev) => ({ ...prev, [id]: next }));
+      setSaving(true);
+      try {
+        await setItemQty(order.id, id, next);
+      } catch (e) {
+        setErrorText((e?.message || "Erreur de sauvegarde").toString());
+      } finally {
+        setSaving(false);
+      }
     },
-    [order, itemsMap]
+    [order?.id, canEdit, selected]
   );
 
   const clearAll = useCallback(async () => {
     if (!order?.id) return;
-      if (!canEdit) return;
-    const ok = confirm("Vider la commande ?");
-    if (!ok) return;
-
+    if (!canEdit) return;
     setSaving(true);
+    setErrorText("");
     try {
-      const del = await supabase.from(ITEMS_TABLE).delete().eq("order_id", order.id);
-      if (del.error) throw del.error;
-      setItemsMap(new Map());
+      await supabase.from("order_items").delete().eq("order_id", order.id);
+      setSelected({});
     } catch (e) {
-      setError(String(e?.message || e));
-      const im = await loadItems(order.id);
-      setItemsMap(im);
+      setErrorText((e?.message || "Erreur").toString());
     } finally {
       setSaving(false);
     }
-  }, [order]);
+  }, [order?.id, canEdit]);
 
-  if (!now) return <div style={{ padding: 24 }}>Chargement…</div>;
+  if (!mounted) return null;
+
+  const cutoffText = cutoff
+    ? `${pad2(cutoff.getDate())}/${pad2(cutoff.getMonth() + 1)}/${cutoff.getFullYear()} ${pad2(
+        cutoff.getHours()
+      )}:${pad2(cutoff.getMinutes())}`
+    : "";
 
   return (
-    <div style={{ maxWidth: 1200, margin: "18px auto", padding: "0 16px 46px" }}>
-      <div style={topbar}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-          <Link href={`/suppliers/${SUPPLIER.key}`} style={linkPill}>← Retour</Link>
-          <div style={{ fontSize: 22, fontWeight: 900, minWidth: 0 }}>
-            {SUPPLIER.icon} {SUPPLIER.label}
-            <span style={{ fontSize: 14, fontWeight: 800, color: "rgba(15,23,42,0.55)", marginLeft: 10 }}>
-              Livraison : {deliveryISO ? frDate(deliveryISO) : "—"}
+    <div style={styles.page}>
+      <div style={styles.container}>
+        <div style={styles.topbar}>
+          <Link href={`/suppliers/${SUPPLIER_KEY}`} style={styles.pillLink}>
+            ← Retour
+          </Link>
+
+          <div style={{ minWidth: 0 }}>
+            <div style={styles.h1}>Produits {SUPPLIER_NAME}</div>
+            <div style={styles.h2}>Livraison : {deliveryISO ? isoToFR(deliveryISO) : "—"}</div>
+          </div>
+
+          <div style={{ flex: 1 }} />
+
+          <div style={styles.statusBox}>
+            <span
+              style={{
+                ...styles.pill,
+                background:
+                  orderStatus === "archived"
+                    ? "rgba(148,163,184,0.25)"
+                    : canEdit
+                    ? "rgba(34,197,94,0.12)"
+                    : "rgba(239,68,68,0.12)",
+                borderColor:
+                  orderStatus === "archived"
+                    ? "rgba(148,163,184,0.35)"
+                    : canEdit
+                    ? "rgba(34,197,94,0.25)"
+                    : "rgba(239,68,68,0.25)",
+              }}
+            >
+              {orderStatus === "archived"
+                ? "📦 Archivée"
+                : canEdit
+                ? orderStatus === "sent"
+                  ? "✅ Envoyée (modif possibles)"
+                  : "✅ Ouverte"
+                : "⛔ Fermée (cutoff dépassé)"}
             </span>
+            <span style={styles.mini}>Cutoff : mercredi 12:00 • {cutoffText}</span>
           </div>
+
+          <button onClick={clearAll} disabled={saving || !canEdit} style={{ ...styles.btn, background: "#fee2e2" }}>
+            🧹 Vider
+          </button>
         </div>
 
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <button onClick={clearAll} style={btnDanger} disabled={saving || !canEdit}>Vider</button>
-</div>
-      </div>
+        {errorText ? <div style={styles.err}>{errorText}</div> : null}
+        {loading ? <div style={styles.mini}>Chargement…</div> : null}
 
-      <div style={statusBox}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ fontWeight: 900 }}>Statut</div>
-          <span style={pill}>{orderStatus === "archived" ? "📦 Archivée" : (isBeforeCutoff ? (orderStatus === "sent" ? "✅ Envoyée (modif possibles)" : "✅ Ouvert (brouillon)") : "⛔ Fermé (cutoff dépassé)")}</span>
-          {saving ? <span style={{ color: "rgba(15,23,42,0.55)", fontWeight: 800 }}>Sauvegarde…</span> : null}
-          <span style={{ color: "rgba(15,23,42,0.55)", fontWeight: 800, fontSize: 12 }}>
-            Prêt • Cutoff: mercredi 12:00 (J-1)
-          </span>
-        </div>
-      </div>
-
-      {error ? <div style={errBox}>{error}</div> : null}
-
-      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr", gap: 16, alignItems: "start" }}>
-        {/* CATALOGUE */}
-        <div style={card}>
-          <div style={cardHead}>
-            <div>
-              <div style={cardTitle}>Catalogue</div>
-              <div style={subTitle}>Coche à gauche puis ajuste la quantité (tactile friendly)</div>
-            </div>
-            <div style={{ fontWeight: 900, color: "rgba(15,23,42,0.55)" }}>{products.length} produit(s)</div>
-          </div>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
-            {FAMILY_TABS.map((f) => {
-              const active = familyFilter === f;
-              return (
-                <button
-                  key={f}
-                  onClick={() => setFamilyFilter(f)}
-                  style={{
-                    padding: "10px 14px",
-                    borderRadius: 999,
-                    border: active ? "1px solid rgba(59,130,246,0.45)" : "1px solid rgba(15,23,42,0.10)",
-                    background: active ? "rgba(59,130,246,0.12)" : "#fff",
-                    fontWeight: 900,
-                    cursor: canEdit ? "pointer" : "not-allowed",
-                  }}
-                >
-                  {f === "TOUS" ? "Tous" : f}
-                </button>
-              );
-            })}
-          </div>
-
+        <div style={styles.filters}>
           <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
             placeholder="Rechercher un produit…"
-            style={searchInput}
+            style={styles.search}
           />
 
-          {loading ? (
-            <div style={muted}>Chargement…</div>
-          ) : (
-            <div style={{ display: "grid", gap: 10 }}>
-              {filteredProducts.map((p) => {
-                const qty = clampQty(itemsMap.get(p.id) || 0);
-                const checked = qty > 0;
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {deptTabs.map((k) => (
+              <button
+                key={k}
+                onClick={() => setDept(k)}
+                style={{
+                  ...styles.tab,
+                  background: dept === k ? "#0ea5e9" : "#fff",
+                  color: dept === k ? "#fff" : "#0f172a",
+                }}
+              >
+                {deptLabel(k)}
+              </button>
+            ))}
+          </div>
 
-                return (
-                  <div
-                    key={p.id}
-                    onClick={() => { if (canEdit) toggleChecked(p.id); }}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: 12,
-                      padding: "12px 12px",
-                      borderRadius: 14,
-                      background: checked ? "rgba(34,197,94,0.08)" : "rgba(2,6,23,0.02)",
-                      border: "1px solid rgba(15,23,42,0.06)",
-                      cursor: canEdit ? "pointer" : "not-allowed",
-                      userSelect: "none",
-                      minWidth: 0,
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                      <input type="checkbox" checked={checked} readOnly style={{ width: 22, height: 22 }} />
-                      {p.image && (p.image.startsWith("http") || p.image.startsWith("data:image")) ? (
-                        <img
-                          src={p.image}
-                          alt=""
-                          style={imgStyle}
-                          onError={(e) => (e.currentTarget.style.display = "none")}
-                        />
-                      ) : (
-                        <span style={{ width: 28, textAlign: "center" }}>{p.emoji}</span>
-                      )}
-                      <div style={itemName}>{p.name}</div>
-                    </div>
-
-                    <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                      <button disabled={!checked || !canEdit} onClick={() => decQty(p.id)} style={qtyBtnStyle(!checked)}>−</button>
-                      <div style={qtyBoxStyle}>{checked ? qty : 0}</div>
-                      <button disabled={!checked || !canEdit} onClick={() => incQty(p.id)} style={qtyBtnStyle(!checked)}>+</button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+          <div style={{ flex: 1 }} />
+          <div style={styles.mini}>Clique pour cocher, puis ajuste avec +/−</div>
         </div>
 
-        {/* SUMMARY */}
-        <div style={{ ...card, position: "sticky", top: 16, height: "fit-content" }}>
-          <div style={cardHead}>
-            <div>
-              <div style={cardTitle}>Commande en cours</div>
-              <div style={subTitle}>{deliveryISO ? frDate(deliveryISO) : ""}</div>
-            </div>
-            <div style={{ fontWeight: 900, color: "rgba(15,23,42,0.55)" }}>{selectedItems.length} article(s)</div>
-          </div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {visibleProducts.map((p) => {
+            const pid = String(p.id);
+            const qty = Number(selected?.[pid] ?? 0);
+            const checked = qty > 0;
 
-          {selectedItems.length === 0 ? (
-            <div style={muted}>Aucun produit sélectionné.</div>
-          ) : (
-            <div style={{ display: "grid", gap: 12 }}>
-              {["Vente", "Boulanger", "Pâtissier"].map((dept) => {
-                const items = grouped[dept] || [];
-                if (!items.length) return null;
-                return (
-                  <div key={dept} style={deptBox}>
-                    <div style={deptTitle}>{dept}</div>
-                    <div style={{ display: "grid", gap: 8 }}>
-                      {items.map((it) => (
-                        <div key={it.id} style={sumRow}>
-                          <div style={{ display: "flex", gap: 8, minWidth: 0, alignItems: "center" }}>
-                            {it.image && (it.image.startsWith("http") || it.image.startsWith("data:image")) ? (
-                              <img
-                                src={it.image}
-                                alt=""
-                                style={{ ...imgStyle, width: 24, height: 24 }}
-                                onError={(e) => (e.currentTarget.style.display = "none")}
-                              />
-                            ) : (
-                              <span>{it.emoji}</span>
-                            )}
-                            <span style={itemName}>{it.name}</span>
-                          </div>
-                          <div style={{ fontWeight: 900 }}>x{it.qty}</div>
-                        </div>
-                      ))}
-                    </div>
+            return (
+              <div
+                key={pid}
+                style={{
+                  ...styles.row,
+                  cursor: canEdit ? "pointer" : "not-allowed",
+                  opacity: canEdit ? 1 : 0.75,
+                  background: checked ? "rgba(34,197,94,0.10)" : "rgba(15,23,42,0.03)",
+                  borderColor: checked ? "rgba(34,197,94,0.35)" : "rgba(15,23,42,0.08)",
+                }}
+                onClick={() => {
+                  if (canEdit) toggleChecked(pid);
+                }}
+              >
+                <div style={{ display: "flex", gap: 10, alignItems: "center", minWidth: 0 }}>
+                  <span style={{ width: 22, textAlign: "center" }}>{productEmoji(p) || "📦"}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={styles.pName}>{productName(p)}</div>
+                    <div style={styles.mini}>{deptLabel(p.dept)}</div>
                   </div>
-                );
-              })}
-            </div>
-          )}
+                </div>
 
-          <div style={{ marginTop: 12, color: "rgba(15,23,42,0.55)", fontSize: 13, fontWeight: 800 }}>
-            Astuce: après un envoi, tu peux rajouter des quantités et renvoyer (ça fera les rajouts).
-          </div>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={!canEdit}
+                    onChange={() => toggleChecked(pid)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+
+                  <button
+                    style={styles.qtyBtn}
+                    disabled={!checked || !canEdit}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      decQty(pid);
+                    }}
+                  >
+                    −
+                  </button>
+
+                  <div style={{ minWidth: 34, textAlign: "center", fontWeight: 900 }}>{checked ? qty : ""}</div>
+
+                  <button
+                    style={styles.qtyBtn}
+                    disabled={!checked || !canEdit}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      incQty(pid);
+                    }}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ marginTop: 14, ...styles.mini }}>
+          Sauvegarde auto. (Max {QTY_MAX} sur l’écran produits)
         </div>
       </div>
     </div>
   );
 }
 
-/* styles */
-const topbar = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  gap: 12,
-  marginBottom: 12,
-};
-const linkPill = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "10px 14px",
-  borderRadius: 999,
-  border: "1px solid rgba(15,23,42,0.10)",
-  background: "#fff",
-  fontWeight: 800,
-  textDecoration: "none",
-  color: "rgba(15,23,42,0.9)",
-  boxShadow: "0 6px 18px rgba(15,23,42,0.05)",
-};
-const statusBox = {
-  borderRadius: 18,
-  border: "1px solid rgba(34,197,94,0.30)",
-  background: "rgba(34,197,94,0.08)",
-  padding: 14,
-  marginBottom: 16,
-};
-const pill = {
-  display: "inline-flex",
-  alignItems: "center",
-  padding: "6px 10px",
-  borderRadius: 999,
-  border: "1px solid rgba(34,197,94,0.35)",
-  background: "rgba(34,197,94,0.12)",
-  fontSize: 13,
-  fontWeight: 900,
-};
-const errBox = { marginBottom: 10, color: "rgba(239,68,68,0.95)", fontWeight: 900 };
-const card = {
-  background: "#fff",
-  border: "1px solid rgba(15,23,42,0.08)",
-  borderRadius: 18,
-  padding: 16,
-  boxShadow: "0 10px 26px rgba(15,23,42,0.08)",
-  minWidth: 0,
-};
-const cardHead = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 };
-const cardTitle = { fontSize: 18, fontWeight: 900 };
-const subTitle = { fontSize: 13, fontWeight: 800, color: "rgba(15,23,42,0.55)" };
-const searchInput = {
-  width: "100%",
-  padding: "12px 14px",
-  borderRadius: 14,
-  border: "1px solid rgba(15,23,42,0.12)",
-  outline: "none",
-  marginBottom: 12,
-  fontWeight: 800,
-};
-const itemName = {
-  fontWeight: 900,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  minWidth: 0,
-};
-const imgStyle = {
-  width: 28,
-  height: 28,
-  borderRadius: 10,
-  objectFit: "cover",
-  border: "1px solid rgba(15,23,42,0.10)",
-};
-const qtyBtnStyle = (disabled) => ({
-  width: 38,
-  height: 38,
-  borderRadius: 12,
-  border: "1px solid rgba(15,23,42,0.12)",
-  background: "#fff",
-  fontWeight: 900,
-  cursor: disabled ? "not-allowed" : "pointer",
-  opacity: disabled ? 0.5 : 1,
-});
-const qtyBoxStyle = {
-  minWidth: 36,
-  textAlign: "center",
-  fontWeight: 900,
-  padding: "8px 10px",
-  borderRadius: 12,
-  border: "1px solid rgba(15,23,42,0.12)",
-  background: "#fff",
-};
-const deptBox = { border: "1px solid rgba(15,23,42,0.08)", borderRadius: 14, padding: 12, minWidth: 0 };
-const deptTitle = { fontSize: 13, fontWeight: 900, color: "rgba(15,23,42,0.75)", marginBottom: 10 };
-const sumRow = {
-  display: "flex",
-  justifyContent: "space-between",
-  gap: 10,
-  alignItems: "center",
-  padding: "8px 10px",
-  borderRadius: 12,
-  border: "1px solid rgba(15,23,42,0.06)",
-  background: "rgba(2,6,23,0.02)",
-  minWidth: 0,
-};
-const muted = { color: "rgba(15,23,42,0.55)", fontWeight: 800 };
-const btnDanger = {
-  padding: "10px 14px",
-  borderRadius: 999,
-  border: "1px solid rgba(239,68,68,0.25)",
-  background: "rgba(239,68,68,0.08)",
-  fontWeight: 900,
-  cursor: canEdit ? "pointer" : "not-allowed",
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "linear-gradient(180deg, #f8fafc, #ffffff)",
+    padding: 14,
+    fontFamily:
+      'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
+    color: "#0f172a",
+  },
+  container: { maxWidth: 980, margin: "0 auto" },
+  topbar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    flexWrap: "wrap",
+    padding: 12,
+    borderRadius: 16,
+    border: "1px solid rgba(15,23,42,0.08)",
+    background: "rgba(255,255,255,0.9)",
+    boxShadow: "0 10px 24px rgba(15,23,42,0.08)",
+    position: "sticky",
+    top: 10,
+    backdropFilter: "blur(10px)",
+    zIndex: 5,
+  },
+  pillLink: {
+    textDecoration: "none",
+    padding: "9px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(15,23,42,0.12)",
+    background: "#fff",
+    fontWeight: 900,
+    color: "#0f172a",
+  },
+  h1: { fontSize: 18, fontWeight: 950 },
+  h2: { fontSize: 12, fontWeight: 900, opacity: 0.65 },
+  btn: {
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(15,23,42,0.12)",
+    background: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  statusBox: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    padding: "8px 10px",
+    borderRadius: 14,
+    border: "1px solid rgba(15,23,42,0.10)",
+    background: "rgba(15,23,42,0.03)",
+  },
+  pill: {
+    padding: "5px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(34,197,94,0.25)",
+    fontWeight: 900,
+    fontSize: 12,
+  },
+  mini: { fontSize: 12, fontWeight: 800, opacity: 0.7 },
+  err: {
+    marginTop: 10,
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(239,68,68,0.25)",
+    background: "rgba(239,68,68,0.08)",
+    color: "#991B1B",
+    fontWeight: 900,
+  },
+  filters: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 12 },
+  search: {
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(15,23,42,0.12)",
+    minWidth: 260,
+    fontWeight: 900,
+    outline: "none",
+  },
+  tab: {
+    padding: "10px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(15,23,42,0.12)",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  row: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 12,
+    alignItems: "center",
+    padding: 12,
+    borderRadius: 16,
+    border: "1px solid rgba(15,23,42,0.08)",
+  },
+  pName: { fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 520 },
+  qtyBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    border: "1px solid rgba(15,23,42,0.12)",
+    background: "#fff",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
 };

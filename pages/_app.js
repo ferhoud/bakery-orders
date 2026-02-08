@@ -38,12 +38,12 @@ export default function MyApp({ Component, pageProps }) {
   const [checking, setChecking] = useState(true);
   const [session, setSession] = useState(null);
 
+  // ✅ Nouveau: on protège uniquement l'admin
   const requiresAuth = useMemo(() => {
     const p = router.pathname || "";
     if (p === "/login") return false;
-    if (p.startsWith("/suppliers")) return true;
-    if (p.startsWith("/admin")) return true;
-    return false;
+    if (p.startsWith("/admin")) return true; // seulement admin
+    return false; // suppliers + accueil accessibles sans login
   }, [router.pathname]);
 
   useEffect(() => {
@@ -82,8 +82,9 @@ export default function MyApp({ Component, pageProps }) {
     }
   }, [requiresAuth, checking, session, router]);
 
+  // Écran neutre uniquement sur routes admin protégées
   if (requiresAuth && (checking || (!checking && !session))) {
-    return <FullPageLoader label="Identification requise…" />;
+    return <FullPageLoader label="Identification admin requise…" />;
   }
 
   return <Component {...pageProps} />;

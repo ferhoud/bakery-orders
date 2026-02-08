@@ -1,12 +1,14 @@
 // pages/suppliers/becus/index.js
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { supabase } from "../../../lib/supabaseClient";
 
 const SUPPLIER_KEY = "becus";
+const SHOP_LABEL = "BM Boulangerie";
+const UI_TAG = "v-becus-ui-2026-02-08-4";
 
-/* -------------------- Helpers -------------------- */
+// ---------- Dates (Bécus = Jeudi) ----------
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -16,30 +18,26 @@ function toISODate(d) {
   return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
 }
 function addDaysISO(iso, delta) {
-  if (!iso) return "";
   const d = new Date(iso + "T00:00:00");
   d.setDate(d.getDate() + delta);
   return toISODate(d);
 }
-function fmtFRDash(iso) {
-  if (!iso || typeof iso !== "string" || !iso.includes("-")) return "—";
-  const parts = iso.slice(0, 10).split("-");
-  if (parts.length !== 3) return iso;
-  const [y, m, d] = parts;
+function isoToDDMMYYYY(iso) {
+  if (!iso || typeof iso !== "string" || !iso.includes("-")) return "";
+  const [y, m, d] = iso.split("-");
   return `${d}-${m}-${y}`;
 }
-function fmtFRSlash(iso) {
-  if (!iso || typeof iso !== "string" || !iso.includes("-")) return "—";
-  const parts = iso.slice(0, 10).split("-");
-  if (parts.length !== 3) return iso;
-  const [y, m, d] = parts;
+function isoToFR(iso) {
+  if (!iso || typeof iso !== "string" || !iso.includes("-")) return "";
+  const [y, m, d] = iso.split("-");
   return `${d}/${m}/${y}`;
 }
 function getBecusDeliveryISO(now = new Date()) {
-  // Delivery day = Thursday.
-  // Switch to next delivery after Thursday 08:00.
+  // Delivery = Thursday
+  // Switch to next delivery after Thursday 08:00
   const n = new Date(now);
-  const day = n.getDay(); // 0 Sun ... 4 Thu
+  const day = n.getDay(); // 0..6 (Sun..Sat)
+
   const base = new Date(n);
   base.setHours(0, 0, 0, 0);
 
@@ -49,7 +47,15 @@ function getBecusDeliveryISO(now = new Date()) {
   if (day === 4 && n.getHours() >= 8) base.setDate(base.getDate() + 7);
   return toISODate(base);
 }
+function getCutoffForDeliveryISO(deliveryISO) {
+  // Wednesday 12:00
+  const d = new Date(deliveryISO + "T00:00:00");
+  d.setDate(d.getDate() - 1);
+  d.setHours(12, 0, 0, 0);
+  return d;
+}
 
+// ---------- Products helpers ----------
 function normDept(x) {
   const s = (x ?? "").toString().trim().toLowerCase();
   if (!s) return "vente";
@@ -57,12 +63,6 @@ function normDept(x) {
   if (s.startsWith("boul")) return "boulanger";
   if (s.startsWith("vent")) return "vente";
   return s;
-}
-function deptLabel(dept) {
-  const d = normDept(dept);
-  if (d === "boulanger") return "Boulanger";
-  if (d === "patiss") return "Pâtissier";
-  return "Vente";
 }
 function productName(p) {
   return (
@@ -78,23 +78,47 @@ function productName(p) {
   ).toString();
 }
 function productEmoji(p) {
-  return (p?.emoji || p?.icon || "📦").toString();
+  return (p?.emoji || p?.icon || "").toString();
 }
-function productImage(p) {
-  return p?.image_url || p?.image || p?.photo || "";
+function productPrice(p) {
+  const v =
+    p?.price ??
+    p?.unit_price ??
+    p?.unitPrice ??
+    p?.prix ??
+    p?.tarif ??
+    null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
-/* -------------------- WhatsApp text -------------------- */
-function buildWhatsAppText({ deliveryISO, items, productById }) {
-  // Required header
-  const header = `🧾 Commande Pour BM Boulangerie Livraison ${fmtFRDash(deliveryISO)}`;
-  const lines = [header, ""];
+// ---------- WhatsApp helpers ----------
+function normalizePhoneForWa(phoneRaw) {
+  const s = (phoneRaw ?? "").toString().trim();
+  if (!s) return "";
+  const hasPlus = s.startsWith("+");
+  const digits = s.replace(/\D+/g, "");
+  if (!digits) return "";
+  return hasPlus ? `+${digits}` : digits;
+}
+function waLink(phone, text) {
+  const p = normalizePhoneForWa(phone);
+  const t = encodeURIComponent(text || "");
+  const p2 = p.startsWith("+") ? p.slice(1) : p;
+  return `https://wa.me/${p2}?text=${t}`;
+}
+function buildFullOrderText({ deliveryISO, items, productById }) {
+  const lines = [];
+  lines.push(`🧾 Commande Pour ${SHOP_LABEL} Livraison ${isoToDDMMYYYY(deliveryISO)}`);
+  lines.push("");
 
   const buckets = { vente: [], boulanger: [], patiss: [] };
   for (const it of items) {
-    const p = productById[it.product_id];
+    const pid = String(it.product_id ?? it.productId ?? "");
+    const qty = Number(it.qty ?? it.quantity ?? 0);
+    const p = productById[pid];
     const dept = normDept(p?.dept);
-    (buckets[dept] ||= []).push({ p, qty: it.qty ?? it.quantity ?? 0 });
+    (buckets[dept] = buckets[dept] || []).push({ p, qty });
   }
 
   const addBucket = (k, title) => {
@@ -102,7 +126,8 @@ function buildWhatsAppText({ deliveryISO, items, productById }) {
     if (!arr.length) return;
     lines.push(`*${title}*`);
     for (const x of arr) {
-      lines.push(`- ${productName(x.p)} x${x.qty}`);
+      const name = productName(x.p);
+      lines.push(`- ${name} x${x.qty}`);
     }
     lines.push("");
   };
@@ -113,11 +138,117 @@ function buildWhatsAppText({ deliveryISO, items, productById }) {
 
   return lines.join("\n").trim();
 }
+function buildDeltaText({ deliveryISO, deltaAdd, deltaDown, productById }) {
+  const header = `🧾 Modification commande ${SHOP_LABEL} Livraison ${isoToDDMMYYYY(deliveryISO)}`;
+  const lines = [header, ""];
 
-/* -------------------- Supabase helpers -------------------- */
+  if (deltaDown.length) {
+    lines.push("Merci de modifier la commande comme suit :");
+    for (const d of deltaDown) {
+      const p = productById[d.product_id];
+      const name = productName(p);
+      if (d.newQty <= 0) {
+        lines.push(`- Supprimer : ${name}`);
+      } else {
+        lines.push(`- ${name} : ${d.oldQty} → ${d.newQty}`);
+      }
+    }
+    lines.push("");
+  }
+
+  if (deltaAdd.length) {
+    lines.push("Merci de rajouter sur la même commande les articles suivants :");
+    for (const a of deltaAdd) {
+      const p = productById[a.product_id];
+      const name = productName(p);
+      lines.push(`- ${name} x${a.addQty}`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n").trim();
+}
+
+// ---------- Storage helpers ----------
+function snapKey(kind, deliveryISO) {
+  return `becus_${kind}_${deliveryISO}`;
+}
+function loadSnap(kind, deliveryISO) {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(snapKey(kind, deliveryISO));
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== "object") return null;
+    return obj;
+  } catch {
+    return null;
+  }
+}
+function saveSnap(kind, deliveryISO, map) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(snapKey(kind, deliveryISO), JSON.stringify(map || {}));
+  } catch {}
+}
+
+// ---------- Supabase helpers ----------
+async function getOrCreateOrder(deliveryISO) {
+  const r = await supabase
+    .from("orders")
+    .select("*")
+    .eq("supplier_key", SUPPLIER_KEY)
+    .eq("delivery_date", deliveryISO)
+    .maybeSingle();
+
+  if (!r.error && r.data) return r.data;
+
+  const ins = await supabase
+    .from("orders")
+    .insert({ supplier_key: SUPPLIER_KEY, delivery_date: deliveryISO, status: "draft" })
+    .select("*")
+    .maybeSingle();
+
+  if (ins.error) throw ins.error;
+  return ins.data;
+}
+
+async function loadItems(orderId) {
+  const r = await supabase
+    .from("order_items")
+    .select("*")
+    .eq("order_id", orderId)
+    .limit(5000);
+  if (r.error) throw r.error;
+  const items = (r.data || []).map((it) => {
+    return {
+      product_id: String(it.product_id ?? it.productId ?? ""),
+      qty: Number(it.qty ?? it.quantity ?? 0),
+    };
+  });
+  return items.filter((it) => it.product_id && Number.isFinite(it.qty) && it.qty > 0);
+}
+
+async function fetchProducts() {
+  const r = await supabase
+    .from("products")
+    .select("*")
+    .eq("supplier_key", SUPPLIER_KEY)
+    .order("dept", { ascending: true })
+    .limit(5000);
+  if (r.error) throw r.error;
+  return r.data || [];
+}
+
 async function getSupplierWhatsApp() {
-  // Try suppliers table first, then supplier_contacts
-  const tryTables = [
+  // Local override (per device)
+  if (typeof window !== "undefined") {
+    const local = (localStorage.getItem("whatsapp_override_becus") || "").trim();
+    if (local) return { phone: local, source: "local" };
+  }
+
+  // Try suppliers then supplier_contacts (best-effort, RLS may block)
+  const tries = [
     async () => {
       const { data } = await supabase
         .from("suppliers")
@@ -135,7 +266,8 @@ async function getSupplierWhatsApp() {
       return data?.[0] || null;
     },
   ];
-  for (const fn of tryTables) {
+
+  for (const fn of tries) {
     try {
       const row = await fn();
       if (row) {
@@ -146,734 +278,781 @@ async function getSupplierWhatsApp() {
           row.phone ||
           row.mobile ||
           "";
-        const name = row.name || row.display_name || row.label || "Bécus";
-        if (phone) return { phone: phone.toString(), name };
-        return { phone: "", name };
+        if (phone) return { phone: phone.toString(), source: "db" };
       }
-    } catch (_) {}
+    } catch {}
   }
-  return { phone: "", name: "Bécus" };
+
+  return { phone: "", source: "none" };
 }
 
-async function findOrderByDate(deliveryISO) {
-  const variants = [
-    { supplierCol: "supplier_key", dateCol: "delivery_date" },
-    { supplierCol: "supplier_key", dateCol: "delivery_day" },
-    { supplierCol: "supplier", dateCol: "delivery_date" },
-    { supplierCol: "supplier", dateCol: "delivery_day" },
-  ];
-
-  for (const v of variants) {
-    try {
-      const { data, error } = await supabase
-        .from("orders")
-        .select("*")
-        .eq(v.supplierCol, SUPPLIER_KEY)
-        .eq(v.dateCol, deliveryISO)
-        .limit(1);
-      if (!error && data && data[0]) return data[0];
-      if (error && /Could not find/i.test(error.message || "")) continue;
-    } catch (_) {}
+async function upsertItem(orderId, productId, qty) {
+  const q = Number(qty);
+  if (!Number.isFinite(q) || q < 0) return;
+  if (q <= 0) {
+    await supabase.from("order_items").delete().eq("order_id", orderId).eq("product_id", productId);
+    return;
   }
-  return null;
+  const payload = { order_id: orderId, product_id: productId, qty: q };
+  const up = await supabase.from("order_items").upsert(payload, { onConflict: "order_id,product_id" });
+  if (up.error) {
+    await supabase.from("order_items").delete().eq("order_id", orderId).eq("product_id", productId);
+    const ins = await supabase.from("order_items").insert(payload);
+    if (ins.error) throw ins.error;
+  }
 }
 
-async function listOrdersForHistory(limit = 80) {
-  const sorts = ["delivery_date", "delivery_day", "created_at"];
-  for (const col of sorts) {
-    try {
-      const { data, error } = await supabase
-        .from("orders")
-        .select("*")
-        .eq("supplier_key", SUPPLIER_KEY)
-        .order(col, { ascending: false })
-        .limit(limit);
-      if (!error && Array.isArray(data)) return data;
-      if (error && /Could not find/i.test(error.message || "")) continue;
-    } catch (_) {}
+function computeTotal(items, productById) {
+  let total = 0;
+  let hasPrice = false;
+  for (const it of items) {
+    const p = productById[it.product_id];
+    const price = productPrice(p);
+    if (price == null) continue;
+    hasPrice = true;
+    total += price * Number(it.qty || 0);
   }
+  return hasPrice ? total : null;
+}
+
+function formatEUR(n) {
   try {
-    const { data } = await supabase.from("orders").select("*").eq("supplier_key", SUPPLIER_KEY).limit(limit);
-    return data || [];
-  } catch (_) {
-    return [];
+    return new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" }).format(n);
+  } catch {
+    return `${Math.round(n * 100) / 100} €`;
   }
 }
 
-async function listItemsForOrder(orderId) {
-  const qtyCols = ["qty", "quantity"];
-  const { data, error } = await supabase.from("order_items").select("*").eq("order_id", orderId);
-  if (error) throw error;
-
-  return (data || [])
-    .map((r) => {
-      let q = 0;
-      for (const c of qtyCols) {
-        if (r[c] != null) {
-          q = Number(r[c]) || 0;
-          break;
-        }
-      }
-      return { ...r, qty: q };
-    })
-    .filter((r) => (r.qty ?? 0) > 0);
-}
-
-async function deleteItem(orderId, productId) {
-  const { error } = await supabase.from("order_items").delete().eq("order_id", orderId).eq("product_id", productId);
-  if (error) throw error;
-}
-
-function monthKey(iso) {
-  const safe = (iso || "").slice(0, 10);
-  if (!safe.includes("-")) return { key: "?", label: "Autre" };
-  const [y, m] = safe.split("-").map(Number);
-  const dt = new Date(y, (m || 1) - 1, 1);
-  const months = [
-    "Janvier",
-    "Février",
-    "Mars",
-    "Avril",
-    "Mai",
-    "Juin",
-    "Juillet",
-    "Août",
-    "Septembre",
-    "Octobre",
-    "Novembre",
-    "Décembre",
-  ];
-  return { key: `${y}-${pad2(m || 1)}`, label: `${months[dt.getMonth()]} ${y}` };
-}
-
-function groupHistoryByMonth(rows) {
-  const groups = new Map();
-  for (const r of rows) {
-    const iso = (r._date || "").slice(0, 10);
-    const mk = monthKey(iso);
-    if (!groups.has(mk.key)) groups.set(mk.key, { key: mk.key, label: mk.label, rows: [] });
-    groups.get(mk.key).rows.push(r);
-  }
-  const arr = Array.from(groups.values());
-  return arr;
-}
-
-function useMounted() {
-  const [ok, setOk] = useState(false);
-  useEffect(() => setOk(true), []);
-  return ok;
-}
-
-/* -------------------- Error Boundary (no more white screen) -------------------- */
-class PageBoundary extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { hasError: false, message: "" };
-  }
-  static getDerivedStateFromError(err) {
-    return { hasError: true, message: (err?.message || "Erreur inconnue").toString() };
-  }
-  componentDidCatch(err) {
-    // eslint-disable-next-line no-console
-    console.error("Bécus page crash:", err);
-  }
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div style={styles.page}>
-          <div style={styles.container}>
-            <div style={styles.card}>
-              <div style={{ fontWeight: 900, fontSize: 18 }}>Erreur sur la page Bécus</div>
-              <div style={{ marginTop: 8, color: "#b91c1c", fontWeight: 800 }}>{this.state.message}</div>
-              <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <a href={`/suppliers/becus?v=${Date.now()}`} style={styles.pillBtn}>
-                  🔄 Recharger
-                </a>
-                <a href={`/suppliers/becus/order?v=${Date.now()}`} style={{ ...styles.pillBtn, background: "#fff7ed" }}>
-                  🧡 Ouvrir Produits Bécus
-                </a>
-                <a href="/" style={styles.pillBtn}>
-                  ← Accueil
-                </a>
-              </div>
-              <div style={{ marginTop: 10, color: "#6b7280", fontWeight: 700 }}>
-                Astuce (tablette/PWA) : si tu vois encore l&apos;ancienne version, vide le cache du site ou supprime les données
-                du site puis relance.
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-/* -------------------- Page -------------------- */
-function BecusHome() {
+export default function BecusHome() {
   const router = useRouter();
-  const mounted = useMounted();
+  const [mounted, setMounted] = useState(false);
+  const [now, setNow] = useState(() => new Date());
 
-  const [deliveryISO, setDeliveryISO] = useState("");
-  useEffect(() => {
-    if (!mounted) return;
-    setDeliveryISO(getBecusDeliveryISO(new Date()));
-  }, [mounted]);
+  const deliveryISO = useMemo(() => {
+    if (!mounted) return "";
+    return getBecusDeliveryISO(now);
+  }, [mounted, now]);
 
-  const prevISO = useMemo(() => addDaysISO(deliveryISO, -7), [deliveryISO]);
+  const prevDeliveryISO = useMemo(() => {
+    if (!deliveryISO) return "";
+    return addDaysISO(deliveryISO, -7);
+  }, [deliveryISO]);
+
+  const cutoff = useMemo(() => (deliveryISO ? getCutoffForDeliveryISO(deliveryISO) : null), [deliveryISO]);
+  const isBeforeCutoff = useMemo(() => {
+    if (!cutoff) return true;
+    return now.getTime() <= cutoff.getTime();
+  }, [now, cutoff]);
+
+  const afterThu08 = useMemo(() => {
+    if (!mounted) return false;
+    const d = new Date(now);
+    return d.getDay() === 4 ? d.getHours() >= 8 : d.getDay() > 4; // Thu after 8, or Fri/Sat
+  }, [mounted, now]);
 
   const [loading, setLoading] = useState(true);
-  const [errorText, setErrorText] = useState("");
-  const [products, setProducts] = useState([]);
-  const [productById, setProductById] = useState({});
+  const [err, setErr] = useState("");
   const [order, setOrder] = useState(null);
   const [items, setItems] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [whats, setWhats] = useState({ phone: "", source: "none" });
+
+  // For "Semaine dernière"
   const [prevOrder, setPrevOrder] = useState(null);
   const [prevItems, setPrevItems] = useState([]);
-  const [history, setHistory] = useState([]);
-  const [wa, setWa] = useState({ phone: "", name: "Bécus" });
+  const [missing, setMissing] = useState({}); // product_id => true
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 20_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Force SW update on version change (helps stop "ancienne version")
+  useEffect(() => {
+    if (!mounted) return;
+    try {
+      const buildId = window.__NEXT_DATA__?.buildId || "";
+      const key = "last_next_build_id";
+      const prev = localStorage.getItem(key) || "";
+      if (buildId && prev && prev !== buildId) {
+        if ("serviceWorker" in navigator) {
+          navigator.serviceWorker
+            .getRegistrations()
+            .then((regs) => Promise.all(regs.map((r) => r.unregister())))
+            .finally(() => {
+              localStorage.setItem(key, buildId);
+              window.location.reload();
+            });
+        } else {
+          localStorage.setItem(key, buildId);
+        }
+      } else if (buildId) {
+        localStorage.setItem(key, buildId);
+        if ("serviceWorker" in navigator) {
+          navigator.serviceWorker.getRegistrations().then((regs) => regs.forEach((r) => r.update().catch(() => {})));
+        }
+      }
+    } catch {}
+  }, [mounted]);
+
+  const productById = useMemo(() => {
+    const map = {};
+    for (const p of products || []) map[String(p.id)] = p;
+    return map;
+  }, [products]);
+
+  const orderStatus = useMemo(() => (order?.status || "draft").toString(), [order]);
+  const isSent = useMemo(() => orderStatus === "sent" || !!order?.sent_at || !!order?.sentAt, [orderStatus, order]);
+
+  const canEdit = useMemo(() => {
+    return !!isBeforeCutoff;
+  }, [isBeforeCutoff]);
+
+  const itemsCount = useMemo(() => items.reduce((a, it) => a + Number(it.qty || 0), 0), [items]);
+  const total = useMemo(() => computeTotal(items, productById), [items, productById]);
+
+  const initialSnap = useMemo(() => (deliveryISO ? loadSnap("initial", deliveryISO) : null), [deliveryISO]);
+  const lastSnap = useMemo(() => (deliveryISO ? loadSnap("last", deliveryISO) : null), [deliveryISO]);
 
   const loadAll = useCallback(async () => {
     if (!deliveryISO) return;
     setLoading(true);
-    setErrorText("");
+    setErr("");
     try {
-      // Catalogue products (Bécus)
-      const { data: prodData, error: prodErr } = await supabase
-        .from("products")
-        .select("*")
-        .eq("supplier_key", SUPPLIER_KEY)
-        .order("dept", { ascending: true });
-      if (prodErr) throw prodErr;
-      const prods = prodData || [];
-      const map = {};
-      for (const p of prods) map[p.id] = p;
+      const [prods, wa, o] = await Promise.all([fetchProducts(), getSupplierWhatsApp(), getOrCreateOrder(deliveryISO)]);
       setProducts(prods);
-      setProductById(map);
-
-      // WhatsApp contact
-      const waInfo = await getSupplierWhatsApp();
-      setWa(waInfo);
-
-      // Current order
-      const o = await findOrderByDate(deliveryISO);
+      setWhats(wa);
       setOrder(o);
-      if (o?.id) {
-        const its = await listItemsForOrder(o.id);
-        setItems(its);
-      } else {
-        setItems([]);
-      }
 
-      // Previous week
-      if (prevISO) {
-        const po = await findOrderByDate(prevISO);
-        setPrevOrder(po);
-        if (po?.id) {
-          const pits = await listItemsForOrder(po.id);
+      const its = await loadItems(o.id);
+      setItems(its);
+
+      if (afterThu08 && prevDeliveryISO) {
+        const pr = await supabase
+          .from("orders")
+          .select("*")
+          .eq("supplier_key", SUPPLIER_KEY)
+          .eq("delivery_date", prevDeliveryISO)
+          .maybeSingle();
+        if (!pr.error && pr.data) {
+          setPrevOrder(pr.data);
+          const pits = await loadItems(pr.data.id);
           setPrevItems(pits);
         } else {
+          setPrevOrder(null);
           setPrevItems([]);
         }
       } else {
         setPrevOrder(null);
         setPrevItems([]);
       }
-
-      // History list
-      const hist = await listOrdersForHistory(120);
-      const cleaned = (hist || [])
-        .map((r) => {
-          const date =
-            r.delivery_date ||
-            r.delivery_day ||
-            r.date ||
-            r.day ||
-            r.created_at?.slice?.(0, 10) ||
-            "";
-          return { ...r, _date: date };
-        })
-        .filter((r) => r._date);
-      setHistory(cleaned);
     } catch (e) {
-      setErrorText((e?.message || "Erreur de chargement.").toString());
+      setErr((e?.message || "Erreur de chargement").toString());
     } finally {
       setLoading(false);
     }
-  }, [deliveryISO, prevISO]);
+  }, [deliveryISO, afterThu08, prevDeliveryISO]);
 
   useEffect(() => {
     if (!mounted) return;
-    if (!deliveryISO) return;
     loadAll();
-  }, [mounted, deliveryISO, loadAll]);
+  }, [mounted, loadAll]);
 
-  const itemsByDept = useMemo(() => {
-    const buckets = { vente: [], boulanger: [], patiss: [] };
-    for (const it of items) {
-      const p = productById[it.product_id] || null;
-      const d = normDept(p?.dept);
-      (buckets[d] ||= []).push({ it, p });
-    }
-    return buckets;
-  }, [items, productById]);
-
-  const prevCompare = useMemo(() => {
-    const prevMap = {};
-    for (const it of prevItems) prevMap[it.product_id] = it.qty ?? it.quantity ?? 0;
-    const curMap = {};
-    for (const it of items) curMap[it.product_id] = it.qty ?? it.quantity ?? 0;
-
-    const allIds = new Set([...Object.keys(prevMap), ...Object.keys(curMap)]);
-    const rows = [];
-    for (const pid of allIds) {
-      const p = productById[pid] || null;
-      const dept = normDept(p?.dept);
-      const prev = Number(prevMap[pid] || 0);
-      const cur = Number(curMap[pid] || 0);
-      if (prev === 0 && cur === 0) continue;
-      rows.push({ product_id: pid, p, dept, prev, cur, delta: cur - prev });
-    }
-    rows.sort((a, b) => productName(a.p).localeCompare(productName(b.p), "fr"));
-    return rows;
-  }, [prevItems, items, productById]);
-
-  const groupedHistory = useMemo(() => {
-    const rows = (history || [])
-      .map((r) => ({ ...r, _date: (r._date || "").slice(0, 10) }))
-      .filter((r) => r._date);
-    return groupHistoryByMonth(rows);
-  }, [history]);
-
-  const openCatalogue = useCallback(() => {
-    router.push(`/suppliers/becus/order?date=${encodeURIComponent(deliveryISO || "")}`);
+  const openProducts = useCallback(() => {
+    if (!deliveryISO) return;
+    router.push(`/suppliers/${SUPPLIER_KEY}/order?date=${encodeURIComponent(deliveryISO)}`);
   }, [router, deliveryISO]);
 
-  const openHistory = useCallback(
-    (iso) => {
-      router.push(`/suppliers/becus/history?date=${encodeURIComponent((iso || "").slice(0, 10))}`);
-    },
-    [router]
-  );
+  const [showPhoneEditor, setShowPhoneEditor] = useState(false);
+  const [phoneDraft, setPhoneDraft] = useState("");
+  useEffect(() => {
+    if (!mounted) return;
+    setPhoneDraft((whats?.phone || "").toString());
+  }, [mounted, whats?.phone]);
 
-  const canSendWhatsApp = useMemo(() => {
-    const phone = (wa?.phone || "").toString().trim();
-    return items.length > 0 && !!phone;
-  }, [items.length, wa?.phone]);
-
-  const sendWhatsApp = useCallback(async () => {
-    setErrorText("");
+  const savePhoneLocal = useCallback(() => {
     try {
-      if (!canSendWhatsApp) {
-        if (!items.length) {
-          setErrorText("Ajoute au moins 1 produit avant d’envoyer.");
-          return;
-        }
-        setErrorText("Numéro WhatsApp manquant (table suppliers / supplier_contacts).");
-        return;
-      }
-      const phone = (wa.phone || "").replace(/[^\d+]/g, "");
-      const text = buildWhatsAppText({
-        deliveryISO,
-        items,
-        productById,
-      });
-      const url = `https://wa.me/${encodeURIComponent(phone)}?text=${encodeURIComponent(text)}`;
-      window.open(url, "_blank", "noopener,noreferrer");
-    } catch (e) {
-      setErrorText((e?.message || "Envoi WhatsApp impossible.").toString());
+      localStorage.setItem("whatsapp_override_becus", (phoneDraft || "").trim());
+      setWhats({ phone: (phoneDraft || "").trim(), source: "local" });
+      setShowPhoneEditor(false);
+    } catch {}
+  }, [phoneDraft]);
+
+  const sendInitial = useCallback(async () => {
+    if (!order?.id) return;
+    if (!canEdit) return;
+    if (!whats?.phone) return;
+    if (!items.length) return;
+
+    const text = buildFullOrderText({ deliveryISO, items, productById });
+    window.open(waLink(whats.phone, text), "_blank");
+
+    try {
+      await supabase.from("orders").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", order.id);
+    } catch {}
+
+    const map = {};
+    for (const it of items) map[String(it.product_id)] = Number(it.qty || 0);
+    saveSnap("initial", deliveryISO, map);
+    saveSnap("last", deliveryISO, map);
+
+    try {
+      const r = await supabase.from("orders").select("*").eq("id", order.id).maybeSingle();
+      if (!r.error && r.data) setOrder(r.data);
+    } catch {}
+  }, [order?.id, canEdit, whats?.phone, items, deliveryISO, productById, order]);
+
+  const computeDelta = useCallback(() => {
+    const base = lastSnap || initialSnap || {};
+    const cur = {};
+    for (const it of items) cur[String(it.product_id)] = Number(it.qty || 0);
+
+    const allIds = new Set([...Object.keys(base || {}), ...Object.keys(cur)]);
+    const add = [];
+    const down = [];
+    for (const id of allIds) {
+      const oldQty = Number(base?.[id] || 0);
+      const newQty = Number(cur?.[id] || 0);
+      if (newQty > oldQty) add.push({ product_id: id, addQty: newQty - oldQty });
+      if (newQty < oldQty) down.push({ product_id: id, oldQty, newQty });
     }
-  }, [wa, deliveryISO, items, productById, canSendWhatsApp]);
+    return { add, down, cur };
+  }, [items, lastSnap, initialSnap]);
 
-  const removeItem = useCallback(
-    async (productId) => {
-      if (!order?.id) return;
-      setErrorText("");
-      try {
-        await deleteItem(order.id, productId);
-        // reload items only (fast)
-        const its = await listItemsForOrder(order.id);
-        setItems(its);
-      } catch (e) {
-        setErrorText((e?.message || "Suppression impossible.").toString());
+  const sendDelta = useCallback(async () => {
+    if (!order?.id) return;
+    if (!canEdit) return;
+    if (!whats?.phone) return;
+
+    const { add, down, cur } = computeDelta();
+    if (!add.length && !down.length) {
+      alert("Aucune modification à envoyer.");
+      return;
+    }
+
+    const text = buildDeltaText({ deliveryISO, deltaAdd: add, deltaDown: down, productById });
+    window.open(waLink(whats.phone, text), "_blank");
+
+    saveSnap("last", deliveryISO, cur);
+  }, [order?.id, canEdit, whats?.phone, computeDelta, deliveryISO, productById]);
+
+  const resetBaselineToCurrent = useCallback(() => {
+    if (!deliveryISO) return;
+    const cur = {};
+    for (const it of items) cur[String(it.product_id)] = Number(it.qty || 0);
+    saveSnap("initial", deliveryISO, cur);
+    saveSnap("last", deliveryISO, cur);
+    alert("Référence enregistrée sur cet appareil.");
+  }, [deliveryISO, items]);
+
+  const validateMissing = useCallback(async () => {
+    if (!prevOrder?.id) return;
+    if (!order?.id) return;
+    if (!canEdit) {
+      alert("Cutoff dépassé: impossible de reporter des manquants.");
+      return;
+    }
+    const ids = Object.keys(missing).filter((k) => missing[k]);
+    if (!ids.length) {
+      alert("Aucun produit manquant sélectionné.");
+      return;
+    }
+
+    setBusy(true);
+    setErr("");
+    try {
+      const prevMap = {};
+      for (const it of prevItems) prevMap[String(it.product_id)] = Number(it.qty || 0);
+
+      const curMap = {};
+      for (const it of items) curMap[String(it.product_id)] = Number(it.qty || 0);
+
+      for (const pid of ids) {
+        const addQty = Number(prevMap[pid] || 0);
+        if (!addQty) continue;
+        const nextQty = Number(curMap[pid] || 0) + addQty;
+        await upsertItem(order.id, pid, nextQty);
       }
-    },
-    [order?.id]
-  );
 
-  if (!mounted) return null;
+      try {
+        await supabase.from("orders").update({ status: "archived" }).eq("id", prevOrder.id);
+      } catch {}
+
+      setMissing({});
+      await loadAll();
+      alert("Produits manquants reportés sur la semaine prochaine ✅");
+    } catch (e) {
+      setErr((e?.message || "Erreur").toString());
+    } finally {
+      setBusy(false);
+    }
+  }, [prevOrder?.id, order?.id, canEdit, missing, prevItems, items, loadAll]);
+
+  const cutoffText = useMemo(() => {
+    if (!cutoff) return "";
+    return `${pad2(cutoff.getDate())}/${pad2(cutoff.getMonth() + 1)}/${cutoff.getFullYear()} ${pad2(
+      cutoff.getHours()
+    )}:${pad2(cutoff.getMinutes())}`;
+  }, [cutoff]);
+
+  const whatsEnabledInitial = !!whats?.phone && items.length > 0 && canEdit && !isSent;
+  const whatsEnabledDelta = !!whats?.phone && canEdit && isSent;
+
+  // Un seul bouton WhatsApp (plus clair) :
+  // - si la commande n'est pas envoyée -> envoie la commande complète
+  // - si la commande est déjà envoyée -> envoie uniquement les modifications
+  const whatsEnabledMain = !!whats?.phone && canEdit && (isSent ? true : items.length > 0);
+
+  const whatsDisabledReason =
+    !whats?.phone ? "Numéro WhatsApp manquant" :
+    !canEdit ? "Cutoff dépassé" :
+    (!isSent && !items.length) ? "Aucun produit" :
+    "";
 
   return (
     <div style={styles.page}>
       <div style={styles.container}>
-        {/* Top header */}
-        <div style={styles.topRow}>
-          <div style={styles.leftTitle}>
-            <Link href="/" style={styles.pillLink}>
-              ← Accueil
-            </Link>
+        <div style={styles.header}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Link href="/" style={styles.pillLink}>← Accueil</Link>
             <div style={{ minWidth: 0 }}>
-              <h1 style={styles.h1}>🥖 Bécus</h1>
-              <div style={styles.sub}>Livraison : {fmtFRSlash(deliveryISO)}</div>
+              <div style={styles.h1}>Bécus</div>
+              <div style={styles.h2}>Livraison : <strong>{deliveryISO ? isoToFR(deliveryISO) : "—"}</strong></div>
             </div>
           </div>
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <button onClick={openCatalogue} style={{ ...styles.pillBtn, ...styles.pillBtnPrimary }}>
-              📦 Produits Bécus
-            </button>
-          </div>
+          <div style={{ flex: 1 }} />
+
+          <button onClick={openProducts} style={{ ...styles.pillBtn, ...styles.pillBtnPrimary }}>
+            📦 Produits Bécus
+          </button>
+          <Link href="/admin" style={styles.pillLink}>🛠️ Admin</Link>
         </div>
 
-        {/* Status banner */}
         <div style={styles.banner}>
-          <strong style={{ fontSize: 16 }}>Statut</strong>
-          <span style={styles.badge}>✅ Ouvert jusqu&apos;au mercredi 12:00</span>
-          {loading ? <span style={styles.smallMeta}>Chargement…</span> : null}
-          {errorText ? <span style={{ ...styles.smallMeta, color: "#b91c1c" }}>{errorText}</span> : null}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={styles.badgeOk}>✅ Ouvert jusqu'au mercredi 12:00</span>
+            {!canEdit ? <span style={styles.badgeNo}>⛔ Fermé (cutoff dépassé)</span> : null}
+            {isSent ? <span style={styles.badgeInfo}>📨 Commande initiale envoyée</span> : null}
+            <span style={styles.smallMeta}>Cutoff : {cutoffText}</span>
+            {loading ? <span style={styles.smallMeta}>Chargement…</span> : null}
+            {err ? <span style={{ ...styles.smallMeta, color: "#b91c1c" }}>{err}</span> : null}
+          </div>
+
+          {!whats?.phone ? (
+            <div style={{ marginTop: 8 }}>
+              <span style={{ ...styles.smallMeta, color: "#b45309" }}>
+                Numéro WhatsApp manquant sur cet appareil.
+              </span>
+              <button onClick={() => setShowPhoneEditor((v) => !v)} style={styles.linkBtn}>
+                Configurer
+              </button>
+            </div>
+          ) : (
+            <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={styles.smallMeta}>
+                WhatsApp : <strong>{whats.phone}</strong> ({whats.source})
+              </span>
+              <button onClick={() => setShowPhoneEditor((v) => !v)} style={styles.linkBtn}>
+                Modifier
+              </button>
+            </div>
+          )}
+
+          {showPhoneEditor ? (
+            <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <input
+                value={phoneDraft}
+                onChange={(e) => setPhoneDraft(e.target.value)}
+                placeholder="+33..."
+                style={styles.input}
+              />
+              <button onClick={savePhoneLocal} style={{ ...styles.pillBtn, background: "#16a34a", color: "#fff" }}>
+                Enregistrer (appareil)
+              </button>
+              <button onClick={() => setShowPhoneEditor(false)} style={{ ...styles.pillBtn }}>
+                Annuler
+              </button>
+            </div>
+          ) : null}
         </div>
 
-        {/* 1) Commande en cours */}
         <div style={styles.card}>
-          <div style={styles.cardTitleRow}>
-            {/* left */}
-            <button onClick={openCatalogue} style={{ ...styles.pillBtn, background: "#fff7ed", borderColor: "#fdba74" }}>
+          <div style={styles.cardTopRow}>
+            <button onClick={openProducts} style={{ ...styles.pillBtn, background: "#fb923c", color: "#111827" }}>
               ➕ Ajouter Produits
             </button>
 
-            {/* center */}
-            <div style={styles.centerTitle}>
-              <div style={styles.cardTitleCentered}>Commande en cours</div>
-              <div style={styles.centerDate}>{fmtFRDash(deliveryISO)}</div>
-            </div>
-
-            {/* right */}
-            <button
-              onClick={sendWhatsApp}
-              disabled={!canSendWhatsApp}
-              style={{
-                ...styles.pillBtn,
-                background: canSendWhatsApp ? "#16a34a" : "#e5e7eb",
-                borderColor: canSendWhatsApp ? "#16a34a" : "#e5e7eb",
-                color: canSendWhatsApp ? "#fff" : "#6b7280",
-              }}
-              title={!items.length ? "Ajoute au moins 1 produit pour activer l’envoi." : ""}
-            >
-              💬 Envoyer WhatsApp
-            </button>
-          </div>
-
-          <div style={styles.familyGrid} className="_becus_familygrid">
-            {["vente", "boulanger", "patiss"].map((dept) => {
-              const label = deptLabel(dept);
-              const list = itemsByDept[dept] || [];
-              return (
-                <div key={dept} style={styles.familyBox}>
-                  <div style={styles.familyTitle}>{label}</div>
-                  {list.length === 0 ? (
-                    <div style={{ color: "#6b7280", fontWeight: 700, fontSize: 13 }}>Aucun produit.</div>
-                  ) : (
-                    list.map(({ it, p }) => {
-                      const img = productImage(p);
-                      return (
-                        <div key={it.product_id} style={styles.itemRow} title={productName(p)}>
-                          <div style={styles.iconBox}>
-                            {img ? <img src={img} alt="" style={styles.img} /> : <span>{productEmoji(p)}</span>}
-                          </div>
-                          <div style={styles.itemName}>{productName(p)}</div>
-                          <div style={styles.itemQty}>x{it.qty ?? it.quantity ?? 0}</div>
-                          <button
-                            onClick={() => removeItem(it.product_id)}
-                            style={styles.removeBtn}
-                            title="Retirer"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          <div style={styles.hint}>Astuce : tu peux retirer un produit ici avec ✕, sans ouvrir “Ajouter Produits”.</div>
-        </div>
-
-        {/* 2) Semaine dernière */}
-        <div style={styles.card}>
-          <div>
-            <h2 style={styles.cardTitle}>Semaine dernière</h2>
-            <div style={styles.cardDate}>{fmtFRSlash(prevISO)}</div>
-          </div>
-
-          {!prevOrder?.id ? (
-            <div style={{ marginTop: 8, color: "#6b7280", fontWeight: 800 }}>Aucune commande S-1.</div>
-          ) : (
-            <div style={{ marginTop: 6 }}>
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Produit</th>
-                    <th style={styles.th}>S-1</th>
-                    <th style={styles.th}>Cette semaine</th>
-                    <th style={styles.th}>Δ</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {prevCompare.map((r) => {
-                    const name = productName(r.p);
-                    const delta = r.delta;
-                    return (
-                      <tr key={r.product_id}>
-                        <td style={styles.td}>
-                          <div style={{ fontWeight: 900 }}>{name}</div>
-                          <div style={{ color: "#6b7280", fontWeight: 800, fontSize: 12 }}>{deptLabel(r.dept)}</div>
-                        </td>
-                        <td style={styles.td}>{r.prev}</td>
-                        <td style={styles.td}>{r.cur}</td>
-                        <td style={styles.td}>
-                          {delta === 0 ? (
-                            <span style={{ color: "#6b7280", fontWeight: 900 }}>0</span>
-                          ) : delta > 0 ? (
-                            <span style={styles.deltaPos}>+{delta}</span>
-                          ) : (
-                            <span style={styles.deltaNeg}>{delta}</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-
-              <div style={styles.hint}>(Comparaison automatique : S-1 vs cette semaine.)</div>
-            </div>
-          )}
-        </div>
-
-        {/* 3) Historique */}
-        <div style={styles.card}>
-          <div>
-            <h2 style={styles.cardTitle}>Historique</h2>
-            <div style={styles.cardDate}>par mois</div>
-          </div>
-
-          {groupedHistory.length === 0 ? (
-            <div style={{ marginTop: 8, color: "#6b7280", fontWeight: 800 }}>Aucune commande.</div>
-          ) : (
-            groupedHistory.map((g) => (
-              <div key={g.key} style={{ marginTop: 12 }}>
-                <div style={styles.historyMonth}>{g.label}</div>
-                {g.rows.map((r) => {
-                  const iso = (r._date || "").slice(0, 10);
-                  const status = (r.status || r.state || r.phase || "").toString() || "draft";
-                  return (
-                    <div key={r.id || iso} style={styles.historyRow}>
-                      <div>
-                        <div style={{ fontWeight: 900, fontSize: 16 }}>{fmtFRSlash(iso)}</div>
-                        <div style={styles.statusPill}>{status}</div>
-                      </div>
-                      <button style={styles.pillBtn} onClick={() => openHistory(iso)}>
-                        Ouvrir
-                      </button>
-                    </div>
-                  );
-                })}
+            <div style={{ flex: 1, textAlign: "center" }}>
+              <div style={styles.cardTitleCenter}>
+                Commande en cours
+                <span style={styles.datePill}> {deliveryISO ? isoToDDMMYYYY(deliveryISO) : ""}</span>
               </div>
-            ))
-          )}
+              <div style={styles.smallMeta}>
+                {isSent ? "Commande initiale envoyée. Utilise Ajout/Modification si besoin." : "Prépare la commande initiale."}
+              </div>
+            </div>
+
+            <button
+              onClick={() => (isSent ? sendDelta() : sendInitial())}
+              disabled={!whatsEnabledMain}
+              style={{
+                ...styles.whatsBtn,
+                background: whatsEnabledMain ? (isSent ? "#0ea5e9" : "#16a34a") : "#e5e7eb",
+                color: whatsEnabledMain ? "#fff" : "#6b7280",
+                cursor: whatsEnabledMain ? "pointer" : "not-allowed",
+              }}
+              title={whatsDisabledReason || (isSent ? "Envoyer les modifications" : "Envoyer la commande")}
+            >
+              {isSent ? "✍️ WhatsApp (modifs)" : "💬 WhatsApp"}
+            </button>
+            {!whatsEnabledMain ? (
+              <div style={{ width: "100%", marginTop: 8 }}>
+                <span style={{ ...styles.smallMeta, color: "#b45309" }}>
+                  {whatsDisabledReason}
+                </span>
+              </div>
+            ) : null}
+          </div>
+
+          <div style={styles.summaryRow}>
+            <div style={styles.summaryBox}>
+              <div style={styles.summaryTitle}>Vente</div>
+              <SummaryList items={items} productById={productById} dept="vente" />
+            </div>
+            <div style={styles.summaryBox}>
+              <div style={styles.summaryTitle}>Boulanger</div>
+              <SummaryList items={items} productById={productById} dept="boulanger" />
+            </div>
+            <div style={styles.summaryBox}>
+              <div style={styles.summaryTitle}>Pâtissier</div>
+              <SummaryList items={items} productById={productById} dept="patiss" />
+            </div>
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={styles.smallMeta}>
+              Total articles : <strong>{itemsCount}</strong>
+            </span>
+            {total != null ? (
+              <span style={styles.smallMeta}>
+                Total : <strong>{formatEUR(total)}</strong>
+              </span>
+            ) : (
+              <span style={styles.smallMeta}>Total : (prix non renseignés)</span>
+            )}
+          </div>
+        </div>
+
+        {isSent ? (
+          <div style={{ ...styles.card, borderColor: "rgba(59,130,246,0.25)", background: "rgba(59,130,246,0.04)" }}>
+            <div style={styles.cardTopRow}>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>Ajout / Modification</div>
+              <div style={{ flex: 1 }} />
+              <button
+                onClick={sendDelta}
+                disabled={!whatsEnabledDelta}
+                style={{
+                  ...styles.whatsBtn,
+                  background: whatsEnabledDelta ? "#0ea5e9" : "#e5e7eb",
+                  color: whatsEnabledDelta ? "#fff" : "#6b7280",
+                  cursor: whatsEnabledDelta ? "pointer" : "not-allowed",
+                }}
+                title={!whats?.phone ? "Numéro manquant" : !canEdit ? "Cutoff dépassé" : ""}
+              >
+                ✍️ Envoyer modifications WhatsApp
+              </button>
+              <button onClick={resetBaselineToCurrent} style={{ ...styles.pillBtn }}>
+                ↺ Référence = actuel
+              </button>
+            </div>
+
+            <div style={styles.smallMeta}>
+              Astuce: modifie les quantités dans <strong>Produits Bécus</strong>, puis reviens ici pour envoyer le message de modification.
+            </div>
+          </div>
+        ) : null}
+
+        {afterThu08 && prevOrder && prevItems.length ? (
+          <div style={styles.card}>
+            <div style={styles.cardTopRow}>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>
+                Commande de la semaine dernière <span style={styles.datePill}>{isoToDDMMYYYY(prevDeliveryISO)}</span>
+              </div>
+              <div style={{ flex: 1 }} />
+              <button
+                onClick={validateMissing}
+                disabled={busy || !canEdit}
+                style={{
+                  ...styles.pillBtn,
+                  background: busy ? "#e5e7eb" : "#111827",
+                  color: busy ? "#6b7280" : "#fff",
+                  cursor: busy || !canEdit ? "not-allowed" : "pointer",
+                }}
+              >
+                ✅ Valider manquants (report semaine prochaine)
+              </button>
+            </div>
+
+            <div style={styles.smallMeta}>Coche les produits non reçus: ils seront ajoutés automatiquement à la prochaine commande.</div>
+
+            <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
+              {prevItems.map((it) => {
+                const p = productById[it.product_id];
+                const name = productName(p);
+                const emoji = productEmoji(p) || "📦";
+                const checked = !!missing[it.product_id];
+
+                return (
+                  <label key={it.product_id} style={styles.missingRow}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        const v = e.target.checked;
+                        setMissing((prev) => ({ ...prev, [it.product_id]: v }));
+                      }}
+                    />
+                    <span style={{ width: 22, textAlign: "center" }}>{emoji}</span>
+                    <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {name}
+                    </span>
+                    <span style={styles.qtyPill}>x{it.qty}</span>
+                  </label>
+                );
+              })}
+            </div>
+
+            <div style={{ marginTop: 10 }}>
+              <Link href={`/suppliers/${SUPPLIER_KEY}/history`} style={styles.pillLink}>
+                📚 Voir les archives
+              </Link>
+            </div>
+          </div>
+        ) : null}
+
+        <div style={styles.footer}>
+          <span style={styles.smallMeta}>UI: {UI_TAG}</span>
         </div>
       </div>
-
-      <style jsx global>{`
-        * { box-sizing: border-box; }
-        @media (max-width: 980px) {
-          ._becus_familygrid { grid-template-columns: 1fr !important; }
-        }
-      `}</style>
     </div>
   );
 }
 
-export default function BecusHomePage() {
+function SummaryList({ items, productById, dept }) {
+  const rows = (items || [])
+    .map((it) => {
+      const p = productById[it.product_id];
+      if (normDept(p?.dept) !== dept) return null;
+      return { id: it.product_id, qty: it.qty, p };
+    })
+    .filter(Boolean);
+
+  if (!rows.length) return <div style={{ opacity: 0.6, fontSize: 13 }}>—</div>;
+
   return (
-    <PageBoundary>
-      <BecusHome />
-    </PageBoundary>
+    <div style={{ display: "grid", gap: 6 }}>
+      {rows.map((r) => (
+        <div key={r.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ width: 20, textAlign: "center" }}>{productEmoji(r.p) || "📦"}</span>
+          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {productName(r.p)}
+          </span>
+          <span style={styles.qtyPill}>x{Number(r.qty || 0)}</span>
+        </div>
+      ))}
+    </div>
   );
 }
 
-/* -------------------- Styles -------------------- */
 const styles = {
   page: {
-    fontFamily:
-      'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
-    color: "#111827",
-    background: "linear-gradient(180deg, #f0f9ff 0%, #ffffff 32%, #ffffff 100%)",
     minHeight: "100vh",
-    paddingBottom: 32,
+    background: "linear-gradient(180deg, #f8fafc, #ffffff)",
+    padding: 14,
+    fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
+    color: "#0f172a",
   },
-  container: { width: "min(1400px, calc(100vw - 32px))", margin: "18px auto 0" },
-
-  topRow: {
+  container: { maxWidth: 1100, margin: "0 auto" },
+  header: {
     display: "flex",
-    gap: 12,
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 10,
-    flexWrap: "wrap",
-  },
-  leftTitle: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
-  h1: { fontSize: 26, fontWeight: 900, margin: 0, lineHeight: 1.1 },
-  sub: { fontSize: 14, color: "#475569", fontWeight: 800, marginTop: 2 },
-
-  pillLink: {
-    display: "inline-flex",
     alignItems: "center",
     gap: 10,
-    padding: "10px 14px",
-    borderRadius: 14,
-    border: "1px solid #e5e7eb",
-    background: "#fff",
+    flexWrap: "wrap",
+    padding: 12,
+    borderRadius: 16,
+    border: "1px solid rgba(15,23,42,0.10)",
+    background: "rgba(255,255,255,0.92)",
+    boxShadow: "0 10px 22px rgba(15,23,42,0.08)",
+    position: "sticky",
+    top: 10,
+    zIndex: 10,
+    backdropFilter: "blur(10px)",
+  },
+  h1: { fontSize: 18, fontWeight: 800, letterSpacing: 0.2 },
+  h2: { fontSize: 12, opacity: 0.75 },
+  pillLink: {
     textDecoration: "none",
-    color: "#111827",
-    fontWeight: 900,
-    boxShadow: "0 8px 20px rgba(17,24,39,.06)",
-    whiteSpace: "nowrap",
+    padding: "9px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(15,23,42,0.12)",
+    background: "#fff",
+    fontWeight: 650,
+    color: "#0f172a",
   },
   pillBtn: {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    padding: "10px 14px",
-    borderRadius: 14,
-    border: "1px solid #e5e7eb",
+    padding: "10px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(15,23,42,0.12)",
     background: "#fff",
-    color: "#111827",
-    fontWeight: 900,
+    fontWeight: 650,
     cursor: "pointer",
-    boxShadow: "0 8px 20px rgba(17,24,39,.06)",
-    whiteSpace: "nowrap",
   },
-  pillBtnPrimary: { background: "#0ea5e9", borderColor: "#0ea5e9", color: "#fff" },
-
+  pillBtnPrimary: {
+    background: "#0ea5e9",
+    color: "#fff",
+    borderColor: "rgba(14,165,233,0.35)",
+  },
   banner: {
-    display: "flex",
-    gap: 10,
-    alignItems: "center",
-    flexWrap: "wrap",
-    padding: "12px 14px",
-    background: "#ffffff",
-    borderRadius: 18,
-    border: "1px solid #e5e7eb",
-    boxShadow: "0 10px 30px rgba(17,24,39,.06)",
-    marginBottom: 14,
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 16,
+    border: "1px solid rgba(15,23,42,0.08)",
+    background: "rgba(15,23,42,0.03)",
   },
-  badge: {
+  badgeOk: {
     display: "inline-flex",
     alignItems: "center",
+    gap: 6,
     padding: "6px 10px",
     borderRadius: 999,
-    background: "#dcfce7",
-    color: "#166534",
-    fontWeight: 900,
-    border: "1px solid #bbf7d0",
+    background: "rgba(34,197,94,0.12)",
+    border: "1px solid rgba(34,197,94,0.25)",
+    fontWeight: 650,
+    fontSize: 12,
   },
-  smallMeta: { fontSize: 12, color: "#6b7280", fontWeight: 800 },
-
+  badgeNo: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "6px 10px",
+    borderRadius: 999,
+    background: "rgba(239,68,68,0.10)",
+    border: "1px solid rgba(239,68,68,0.25)",
+    fontWeight: 650,
+    fontSize: 12,
+  },
+  badgeInfo: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "6px 10px",
+    borderRadius: 999,
+    background: "rgba(59,130,246,0.10)",
+    border: "1px solid rgba(59,130,246,0.25)",
+    fontWeight: 650,
+    fontSize: 12,
+  },
+  smallMeta: { fontSize: 12, opacity: 0.75, fontWeight: 600 },
   card: {
-    background: "#fff",
-    borderRadius: 22,
-    border: "1px solid #e5e7eb",
-    boxShadow: "0 12px 38px rgba(17,24,39,.06)",
+    marginTop: 14,
     padding: 14,
-    marginBottom: 14,
+    borderRadius: 18,
+    border: "1px solid rgba(15,23,42,0.10)",
+    background: "#fff",
+    boxShadow: "0 10px 22px rgba(15,23,42,0.06)",
   },
-  cardTitle: { fontSize: 18, margin: 0, fontWeight: 950 },
-  cardDate: { fontSize: 13, color: "#6b7280", fontWeight: 900, marginTop: 2 },
-
-  cardTitleRow: {
+  cardTopRow: {
     display: "flex",
     alignItems: "center",
-    justifyContent: "space-between",
     gap: 10,
     flexWrap: "wrap",
-    marginBottom: 10,
   },
-  centerTitle: { display: "flex", alignItems: "center", gap: 10, justifyContent: "center", flex: 1, minWidth: 260 },
-  cardTitleCentered: { fontSize: 18, fontWeight: 950, textAlign: "center" },
-  centerDate: { fontSize: 13, color: "#64748b", fontWeight: 950, textAlign: "center" },
-
-  familyGrid: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 10 },
-  familyBox: { border: "1px solid #eef2f7", borderRadius: 18, padding: 10, background: "#f8fafc" },
-  familyTitle: { fontSize: 14, fontWeight: 950, marginBottom: 8, color: "#0f172a" },
-  itemRow: {
-    display: "grid",
-    gridTemplateColumns: "40px 1fr auto 30px",
-    gap: 10,
-    alignItems: "center",
-    padding: "8px 8px",
-    borderRadius: 14,
-    background: "#fff",
-    border: "1px solid #eef2f7",
-    marginBottom: 8,
+  cardTitleCenter: {
+    fontSize: 18,
+    fontWeight: 800,
+    letterSpacing: 0.2,
   },
-  iconBox: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    background: "#f1f5f9",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-  img: { width: "100%", height: "100%", objectFit: "cover" },
-  itemName: { fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  itemQty: { fontWeight: 950, color: "#0f172a" },
-  removeBtn: {
-    border: "1px solid #fee2e2",
-    background: "#fff1f2",
-    color: "#b91c1c",
-    borderRadius: 10,
-    width: 28,
-    height: 28,
-    cursor: "pointer",
-    fontWeight: 950,
-  },
-
-  hint: { marginTop: 8, fontSize: 12, color: "#64748b", fontWeight: 900 },
-
-  table: { width: "100%", borderCollapse: "separate", borderSpacing: 0, marginTop: 10, overflow: "hidden" },
-  th: { textAlign: "left", fontWeight: 950, padding: "10px 10px", borderBottom: "1px solid #e5e7eb", color: "#334155" },
-  td: { padding: "10px 10px", borderBottom: "1px solid #f1f5f9", fontWeight: 800, color: "#0f172a" },
-  deltaPos: { color: "#166534", fontWeight: 950 },
-  deltaNeg: { color: "#b91c1c", fontWeight: 950 },
-
-  historyMonth: { fontWeight: 950, color: "#334155", marginBottom: 6 },
-  historyRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    padding: "10px 10px",
-    borderRadius: 16,
-    border: "1px solid #eef2f7",
-    background: "#f8fafc",
-    marginBottom: 8,
-  },
-  statusPill: {
-    display: "inline-flex",
-    marginTop: 6,
+  datePill: {
+    display: "inline-block",
+    marginLeft: 8,
     padding: "4px 10px",
     borderRadius: 999,
-    border: "1px solid #e5e7eb",
-    background: "#fff",
-    fontWeight: 900,
-    color: "#475569",
+    background: "rgba(15,23,42,0.05)",
+    border: "1px solid rgba(15,23,42,0.08)",
     fontSize: 12,
+    fontWeight: 700,
+    verticalAlign: "middle",
+  },
+  whatsBtn: {
+    padding: "10px 14px",
+    borderRadius: 999,
+    border: "1px solid rgba(15,23,42,0.12)",
+    fontWeight: 750,
+  },
+  summaryRow: {
+    marginTop: 12,
+    display: "grid",
+    gap: 12,
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  },
+  summaryBox: {
+    padding: 12,
+    borderRadius: 16,
+    border: "1px solid rgba(15,23,42,0.08)",
+    background: "rgba(15,23,42,0.02)",
+    minHeight: 90,
+  },
+  summaryTitle: {
+    fontSize: 13,
+    fontWeight: 800,
+    marginBottom: 8,
+    opacity: 0.8,
+  },
+  qtyPill: {
+    display: "inline-block",
+    minWidth: 44,
+    textAlign: "center",
+    padding: "4px 10px",
+    borderRadius: 999,
+    background: "rgba(15,23,42,0.06)",
+    border: "1px solid rgba(15,23,42,0.10)",
+    fontWeight: 800,
+    fontSize: 12,
+  },
+  input: {
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(15,23,42,0.12)",
+    minWidth: 240,
+    outline: "none",
+    fontWeight: 650,
+  },
+  linkBtn: {
+    border: "none",
+    background: "transparent",
+    color: "#0ea5e9",
+    fontWeight: 750,
+    cursor: "pointer",
+    padding: 0,
+    marginLeft: 8,
+    textDecoration: "underline",
+  },
+  missingRow: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    padding: 10,
+    borderRadius: 14,
+    border: "1px solid rgba(15,23,42,0.08)",
+    background: "rgba(15,23,42,0.02)",
+  },
+  footer: {
+    marginTop: 18,
+    padding: 12,
+    textAlign: "center",
+    opacity: 0.7,
   },
 };

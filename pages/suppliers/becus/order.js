@@ -7,8 +7,8 @@ import { supabase } from "../../../lib/supabaseClient";
 const SUPPLIER_KEY = "becus";
 const SUPPLIER_NAME = "Bécus";
 const QTY_MAX = 20;
+const UI_TAG = "v-becus-ui-2026-02-08-3";
 
-// ---------- Date helpers ----------
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -23,28 +23,22 @@ function isoToFR(iso) {
   return `${d}/${m}/${y}`;
 }
 function getBecusDeliveryISO(now = new Date()) {
-  // Delivery day = Thursday.
-  // Switch to next delivery after Thursday 08:00.
   const n = new Date(now);
-  const day = n.getDay(); // 0 Sun ... 4 Thu
+  const day = n.getDay();
   const base = new Date(n);
   base.setHours(0, 0, 0, 0);
-
   const daysUntilThu = (4 - day + 7) % 7;
-  base.setDate(base.getDate() + daysUntilThu); // this week's Thu (or today if Thu)
-
+  base.setDate(base.getDate() + daysUntilThu);
   if (day === 4 && n.getHours() >= 8) base.setDate(base.getDate() + 7);
   return toISODate(base);
 }
 function getCutoffForDeliveryISO(deliveryISO) {
-  // Wednesday 12:00 (day before Thursday delivery)
   const d = new Date(deliveryISO + "T00:00:00");
   d.setDate(d.getDate() - 1);
   d.setHours(12, 0, 0, 0);
   return d;
 }
 
-// ---------- Product helpers ----------
 function normDept(x) {
   const s = (x ?? "").toString().trim().toLowerCase();
   if (!s) return "vente";
@@ -76,7 +70,6 @@ function productEmoji(p) {
   return (p?.emoji || p?.icon || "").toString();
 }
 
-// ---------- Supabase helpers ----------
 async function getOrCreateOrder(deliveryISO) {
   const r = await supabase
     .from("orders")
@@ -122,23 +115,19 @@ async function setItemQty(orderId, productId, qty) {
   const up = await supabase.from("order_items").upsert(payload, { onConflict: "order_id,product_id" });
   if (!up.error) return;
 
-  // fallback
   await supabase.from("order_items").delete().eq("order_id", orderId).eq("product_id", productId);
   const ins = await supabase.from("order_items").insert(payload);
   if (ins.error) throw ins.error;
 }
 
-// ---------- Page ----------
 export default function BecusOrderPage() {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
   const [now, setNow] = useState(() => new Date());
 
-  // IMPORTANT: compute deliveryISO safely for SSR/build
   const dateParam = useMemo(() => (router.query?.date || "").toString(), [router.query]);
   const deliveryISO = useMemo(() => {
     if (dateParam) return dateParam;
-    // avoid SSR surprises: if not mounted yet, return empty and fill after mount
     if (!mounted) return "";
     return getBecusDeliveryISO(now);
   }, [dateParam, mounted, now]);
@@ -151,24 +140,20 @@ export default function BecusOrderPage() {
 
   const [loading, setLoading] = useState(true);
   const [errorText, setErrorText] = useState("");
-
   const [order, setOrder] = useState(null);
   const [products, setProducts] = useState([]);
-  const [selected, setSelected] = useState({}); // { productId: qty }
+  const [selected, setSelected] = useState({});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => setMounted(true), []);
   useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 15_000);
+    const t = setInterval(() => setNow(new Date()), 20_000);
     return () => clearInterval(t);
   }, []);
 
-  // These must be defined BEFORE callbacks that use them in dependency arrays
-  const orderStatus = useMemo(() => (order?.status || order?.state || "draft").toString(), [order]);
-
+  const orderStatus = useMemo(() => (order?.status || "draft").toString(), [order]);
   const canEdit = useMemo(() => {
     if (orderStatus === "archived") return false;
-    // For Bécus: edits/ajouts allowed until cutoff, regardless of sent/draft
     return !!isBeforeCutoff;
   }, [orderStatus, isBeforeCutoff]);
 
@@ -181,7 +166,8 @@ export default function BecusOrderPage() {
         .from("products")
         .select("*")
         .eq("supplier_key", SUPPLIER_KEY)
-        .order("dept", { ascending: true });
+        .order("dept", { ascending: true })
+        .limit(5000);
       if (prodErr) throw prodErr;
       setProducts(prodData || []);
 
@@ -198,7 +184,6 @@ export default function BecusOrderPage() {
   }, [deliveryISO]);
 
   useEffect(() => {
-    // avoid running on SSR/build with empty date
     if (!mounted) return;
     if (!router.isReady) return;
     if (!deliveryISO) return;
@@ -285,21 +270,6 @@ export default function BecusOrderPage() {
     [order?.id, canEdit, selected]
   );
 
-  const clearAll = useCallback(async () => {
-    if (!order?.id) return;
-    if (!canEdit) return;
-    setSaving(true);
-    setErrorText("");
-    try {
-      await supabase.from("order_items").delete().eq("order_id", order.id);
-      setSelected({});
-    } catch (e) {
-      setErrorText((e?.message || "Erreur").toString());
-    } finally {
-      setSaving(false);
-    }
-  }, [order?.id, canEdit]);
-
   if (!mounted) return null;
 
   const cutoffText = cutoff
@@ -318,55 +288,30 @@ export default function BecusOrderPage() {
 
           <div style={{ minWidth: 0 }}>
             <div style={styles.h1}>Produits {SUPPLIER_NAME}</div>
-            <div style={styles.h2}>Livraison : {deliveryISO ? isoToFR(deliveryISO) : "—"}</div>
+            <div style={styles.h2}>
+              Livraison : <strong>{deliveryISO ? isoToFR(deliveryISO) : "—"}</strong>
+            </div>
           </div>
 
           <div style={{ flex: 1 }} />
 
-          <div style={styles.statusBox}>
-            <span
-              style={{
-                ...styles.pill,
-                background:
-                  orderStatus === "archived"
-                    ? "rgba(148,163,184,0.25)"
-                    : canEdit
-                    ? "rgba(34,197,94,0.12)"
-                    : "rgba(239,68,68,0.12)",
-                borderColor:
-                  orderStatus === "archived"
-                    ? "rgba(148,163,184,0.35)"
-                    : canEdit
-                    ? "rgba(34,197,94,0.25)"
-                    : "rgba(239,68,68,0.25)",
-              }}
-            >
-              {orderStatus === "archived"
-                ? "📦 Archivée"
-                : canEdit
-                ? orderStatus === "sent"
-                  ? "✅ Envoyée (modif possibles)"
-                  : "✅ Ouverte"
-                : "⛔ Fermée (cutoff dépassé)"}
-            </span>
-            <span style={styles.mini}>Cutoff : mercredi 12:00 • {cutoffText}</span>
-          </div>
-
-          <button onClick={clearAll} disabled={saving || !canEdit} style={{ ...styles.btn, background: "#fee2e2" }}>
-            🧹 Vider
-          </button>
+          <span
+            style={{
+              ...styles.pill,
+              background: canEdit ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)",
+              borderColor: canEdit ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)",
+            }}
+          >
+            {canEdit ? "✅ Ouvert" : "⛔ Fermé"}
+          </span>
+          <span style={styles.mini}>Cutoff : {cutoffText}</span>
         </div>
 
         {errorText ? <div style={styles.err}>{errorText}</div> : null}
         {loading ? <div style={styles.mini}>Chargement…</div> : null}
 
         <div style={styles.filters}>
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Rechercher un produit…"
-            style={styles.search}
-          />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Rechercher un produit…" style={styles.search} />
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {deptTabs.map((k) => (
@@ -385,7 +330,7 @@ export default function BecusOrderPage() {
           </div>
 
           <div style={{ flex: 1 }} />
-          <div style={styles.mini}>Clique pour cocher, puis ajuste avec +/−</div>
+          <div style={styles.mini}>{saving ? "Sauvegarde…" : "Coche, puis ajuste avec + / −"}</div>
         </div>
 
         <div style={{ display: "grid", gap: 10 }}>
@@ -436,7 +381,7 @@ export default function BecusOrderPage() {
                     −
                   </button>
 
-                  <div style={{ minWidth: 34, textAlign: "center", fontWeight: 900 }}>{checked ? qty : ""}</div>
+                  <div style={{ minWidth: 34, textAlign: "center", fontWeight: 800 }}>{checked ? qty : ""}</div>
 
                   <button
                     style={styles.qtyBtn}
@@ -454,9 +399,7 @@ export default function BecusOrderPage() {
           })}
         </div>
 
-        <div style={{ marginTop: 14, ...styles.mini }}>
-          Sauvegarde auto. (Max {QTY_MAX} sur l’écran produits)
-        </div>
+        <div style={{ marginTop: 14, ...styles.mini }}>UI: {UI_TAG}</div>
       </div>
     </div>
   );
@@ -467,8 +410,7 @@ const styles = {
     minHeight: "100vh",
     background: "linear-gradient(180deg, #f8fafc, #ffffff)",
     padding: 14,
-    fontFamily:
-      'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
+    fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial',
     color: "#0f172a",
   },
   container: { maxWidth: 980, margin: "0 auto" },
@@ -493,36 +435,19 @@ const styles = {
     borderRadius: 999,
     border: "1px solid rgba(15,23,42,0.12)",
     background: "#fff",
-    fontWeight: 900,
+    fontWeight: 650,
     color: "#0f172a",
   },
-  h1: { fontSize: 18, fontWeight: 950 },
-  h2: { fontSize: 12, fontWeight: 900, opacity: 0.65 },
-  btn: {
-    padding: "10px 12px",
-    borderRadius: 14,
-    border: "1px solid rgba(15,23,42,0.12)",
-    background: "#fff",
-    fontWeight: 900,
-    cursor: "pointer",
-  },
-  statusBox: {
-    display: "flex",
-    flexDirection: "column",
-    gap: 4,
-    padding: "8px 10px",
-    borderRadius: 14,
-    border: "1px solid rgba(15,23,42,0.10)",
-    background: "rgba(15,23,42,0.03)",
-  },
+  h1: { fontSize: 18, fontWeight: 800 },
+  h2: { fontSize: 12, fontWeight: 650, opacity: 0.65 },
   pill: {
-    padding: "5px 10px",
+    padding: "6px 10px",
     borderRadius: 999,
     border: "1px solid rgba(34,197,94,0.25)",
-    fontWeight: 900,
+    fontWeight: 650,
     fontSize: 12,
   },
-  mini: { fontSize: 12, fontWeight: 800, opacity: 0.7 },
+  mini: { fontSize: 12, fontWeight: 600, opacity: 0.7 },
   err: {
     marginTop: 10,
     padding: "10px 12px",
@@ -530,7 +455,7 @@ const styles = {
     border: "1px solid rgba(239,68,68,0.25)",
     background: "rgba(239,68,68,0.08)",
     color: "#991B1B",
-    fontWeight: 900,
+    fontWeight: 700,
   },
   filters: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 12 },
   search: {
@@ -538,14 +463,14 @@ const styles = {
     borderRadius: 14,
     border: "1px solid rgba(15,23,42,0.12)",
     minWidth: 260,
-    fontWeight: 900,
+    fontWeight: 650,
     outline: "none",
   },
   tab: {
     padding: "10px 12px",
     borderRadius: 999,
     border: "1px solid rgba(15,23,42,0.12)",
-    fontWeight: 900,
+    fontWeight: 650,
     cursor: "pointer",
   },
   row: {
@@ -557,14 +482,14 @@ const styles = {
     borderRadius: 16,
     border: "1px solid rgba(15,23,42,0.08)",
   },
-  pName: { fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 520 },
+  pName: { fontWeight: 750, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 520 },
   qtyBtn: {
     width: 34,
     height: 34,
     borderRadius: 10,
     border: "1px solid rgba(15,23,42,0.12)",
     background: "#fff",
-    fontWeight: 900,
+    fontWeight: 800,
     cursor: "pointer",
   },
 };

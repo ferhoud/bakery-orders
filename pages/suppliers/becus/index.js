@@ -6,7 +6,7 @@ import { supabase } from "../../../lib/supabaseClient";
 
 const SUPPLIER_KEY = "becus";
 const SHOP_LABEL = "BM Boulangerie";
-const UI_TAG = "v-becus-ui-2026-02-08-6";
+const UI_TAG = "v-becus-ui-2026-02-09-archives-products-fix";
 
 // ---------- Dates (Bécus = Jeudi) ----------
 function pad2(n) {
@@ -80,6 +80,96 @@ function productName(p) {
 function productEmoji(p) {
   return (p?.emoji || p?.icon || "").toString();
 }
+function productThumb(p) {
+  return (
+    p?.image_url ||
+    p?.photo_url ||
+    p?.image ||
+    p?.thumbnail ||
+    p?.imageUrl ||
+    p?.imageURL ||
+    p?.picture ||
+    p?.pic ||
+    ""
+  )
+    .toString()
+    .trim();
+}
+
+function deptFallbackEmoji(dept) {
+  const d = normDept(dept);
+  if (d === "boulanger") return "🥖";
+  if (d === "patiss") return "🍰";
+  // vente / défaut
+  return "🧺";
+}
+
+function ProductIcon({ p, size = 20 }) {
+  const url = productThumb(p);
+  const emoji = productEmoji(p) || deptFallbackEmoji(p?.dept) || "📦";
+
+  const box = {
+    width: size,
+    height: size,
+    borderRadius: 6,
+    overflow: "hidden",
+    display: "grid",
+    placeItems: "center",
+    flex: "0 0 auto",
+  };
+
+  if (url) {
+    return (
+      <span style={{ ...box, border: "1px solid rgba(15,23,42,0.10)", background: "#fff" }}>
+        <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      </span>
+    );
+  }
+
+  return <span style={{ width: size, textAlign: "center", lineHeight: `${size}px` }}>{emoji}</span>;
+}
+
+function normKey(x) {
+  const s = (x ?? "").toString().trim().toLowerCase();
+  if (!s) return "";
+  // UUIDs parfois avec / sans tirets selon les tables
+  return s.replace(/-/g, "");
+}
+
+function buildProductIndex(products) {
+  const map = {};
+  for (const p of products || []) {
+    const add = (v) => {
+      const k = normKey(v);
+      if (k) map[k] = p;
+    };
+
+    // id & uuid (et variantes)
+    add(p?.id);
+    add(p?.uuid);
+    add(p?.product_id);
+    add(p?.productId);
+    add(p?.code);
+    add(p?.sku);
+    add(p?.ref);
+    add(p?.external_id);
+    add(p?.externalId);
+
+    // aussi stocker la forme brute (si jamais)
+    const raw = (p?.id ?? "").toString().trim().toLowerCase();
+    if (raw) map[raw] = p;
+    const rawUuid = (p?.uuid ?? "").toString().trim().toLowerCase();
+    if (rawUuid) map[rawUuid] = p;
+  }
+  return map;
+}
+
+function itemsFromMap(map) {
+  return Object.entries(map || {})
+    .map(([product_id, qty]) => ({ product_id: String(product_id), qty: Number(qty || 0) }))
+    .filter((it) => Number(it.qty || 0) > 0);
+}
+
 function productPrice(p) {
   const v = p?.price ?? p?.unit_price ?? p?.unitPrice ?? p?.prix ?? p?.tarif ?? null;
   const n = Number(v);
@@ -338,7 +428,7 @@ function computeTotal(items, productById) {
   let total = 0;
   let hasPrice = false;
   for (const it of items) {
-    const price = productPrice(productById[it.product_id]);
+    const price = productPrice(productById[normKey(it.product_id)] || productById[it.product_id]);
     if (price == null) continue;
     hasPrice = true;
     total += price * Number(it.qty || 0);
@@ -435,11 +525,7 @@ export default function BecusHome() {
     } catch {}
   }, [mounted]);
 
-  const productById = useMemo(() => {
-    const map = {};
-    for (const p of products || []) map[String(p.id)] = p;
-    return map;
-  }, [products]);
+  const productById = useMemo(() => buildProductIndex(products), [products]);
 
   const orderStatus = useMemo(() => (order?.status || "draft").toString(), [order]);
   const isSent = useMemo(() => orderStatus === "sent" || !!order?.sent_at || !!order?.sentAt, [orderStatus, order]);
@@ -453,6 +539,35 @@ export default function BecusHome() {
 
   const itemsCount = useMemo(() => items.reduce((a, it) => a + Number(it.qty || 0), 0), [items]);
   const total = useMemo(() => computeTotal(items, productById), [items, productById]);
+
+  const resolveProduct = useCallback(
+    (pid) => {
+      const k = normKey(pid);
+      return (k && productById[k]) || productById[(pid ?? "").toString()] || null;
+    },
+    [productById]
+  );
+
+  const initialBaseMap = useMemo(() => {
+    if (!isSent) return null;
+    const dbIni = dbSnap?.initial && Object.keys(dbSnap.initial).length ? dbSnap.initial : null;
+    if (dbIni) return dbIni;
+    const localIni = initialSnapLocal && Object.keys(initialSnapLocal).length ? initialSnapLocal : null;
+    return localIni;
+  }, [isSent, dbSnap?.initial, initialSnapLocal]);
+
+  const initialDisplayItems = useMemo(() => {
+    if (!isSent) return items;
+    return initialBaseMap ? itemsFromMap(initialBaseMap) : items;
+  }, [isSent, initialBaseMap, items]);
+
+  const displayCount = useMemo(
+    () => initialDisplayItems.reduce((a, it) => a + Number(it.qty || 0), 0),
+    [initialDisplayItems]
+  );
+  const displayTotal = useMemo(() => computeTotal(initialDisplayItems, productById), [initialDisplayItems, productById]);
+
+  const showInitialWarning = useMemo(() => isSent && !initialBaseMap, [isSent, initialBaseMap]);
 
   const initialSnapLocal = useMemo(() => (deliveryISO ? loadSnap("initial", deliveryISO) : null), [deliveryISO]);
   const lastSnapLocal = useMemo(() => (deliveryISO ? loadSnap("last", deliveryISO) : null), [deliveryISO]);
@@ -475,19 +590,8 @@ export default function BecusHome() {
       // Load shared snapshots if possible (so Ajout/Modification works on any device)
       if (sent) {
         const [ini, lst] = await Promise.all([fetchSnapshot(o.id, "initial"), fetchSnapshot(o.id, "last")]);
-
-        // If snapshot system is new and empty, auto-seed from current items (best-effort)
-        const curMap = mapFromItems(its);
-        const iniEmpty = !ini || !Object.keys(ini).length;
-        const lstEmpty = !lst || !Object.keys(lst).length;
-
-        if (iniEmpty && lstEmpty) {
-          await writeSnapshot(o.id, "initial", curMap);
-          await writeSnapshot(o.id, "last", curMap);
-          setDbSnap({ initial: curMap, last: curMap, ready: true, source: "seeded" });
-        } else {
-          setDbSnap({ initial: ini || {}, last: lst || {}, ready: true, source: "db" });
-        }
+        // IMPORTANT: ne jamais "auto-seed" sans action explicite (sinon la référence bouge toute seule)
+        setDbSnap({ initial: ini || {}, last: lst || {}, ready: true, source: "db" });
       } else {
         setDbSnap({ initial: null, last: null, ready: false, source: "none" });
       }
@@ -524,10 +628,15 @@ export default function BecusHome() {
     loadAll();
   }, [mounted, loadAll]);
 
-  const openProducts = useCallback(() => {
+  const openOrderEditor = useCallback(() => {
     if (!deliveryISO) return;
     router.push(`/suppliers/${SUPPLIER_KEY}/order?date=${encodeURIComponent(deliveryISO)}`);
   }, [router, deliveryISO]);
+
+  const goProductsManager = useCallback(() => {
+    const back = `/suppliers/${SUPPLIER_KEY}`;
+    router.push(`/products?supplier=${SUPPLIER_KEY}&back=${encodeURIComponent(back)}`);
+  }, [router]);
 
   useEffect(() => {
     if (!mounted) return;
@@ -743,7 +852,7 @@ export default function BecusHome() {
 
           <div style={{ flex: 1 }} />
 
-          <button onClick={openProducts} style={{ ...styles.pillBtn, ...styles.pillBtnPrimary }}>
+          <button onClick={goProductsManager} style={{ ...styles.pillBtn, ...styles.pillBtnPrimary }}>
             📦 Produits Bécus
           </button>
           <Link href="/admin/suppliers" style={styles.pillLink}>
@@ -812,6 +921,11 @@ export default function BecusHome() {
                   ? "Envoyée. Pour modifier, utilise le bloc Ajout / Modification."
                   : "Prépare la commande, puis envoie sur WhatsApp."}
               </div>
+              {showInitialWarning ? (
+                <div style={{ ...styles.smallMeta, color: "#b45309" }}>
+                  Référence initiale introuvable (snapshots). La carte affiche l’état actuel. Si besoin, clique sur “↺ Référence = actuel”.
+                </div>
+              ) : null}
             </div>
 
             <button
@@ -840,11 +954,11 @@ export default function BecusHome() {
             }}
           >
             <span style={styles.smallMeta}>
-              Total articles : <strong>{itemsCount}</strong>
+              Total articles : <strong>{displayCount}</strong>
             </span>
-            {total != null ? (
+            {displayTotal != null ? (
               <span style={styles.smallMeta}>
-                Total : <strong>{formatEUR(total)}</strong>
+                Total : <strong>{formatEUR(displayTotal)}</strong>
               </span>
             ) : (
               <span style={styles.smallMeta}>Total : (prix non renseignés)</span>
@@ -856,21 +970,21 @@ export default function BecusHome() {
               <div style={styles.summaryRow}>
                 <div style={styles.summaryBox}>
                   <div style={styles.summaryTitle}>Vente</div>
-                  <SummaryList items={items} productById={productById} dept="vente" />
+                  <SummaryList items={initialDisplayItems} resolveProduct={resolveProduct} dept="vente" />
                 </div>
                 <div style={styles.summaryBox}>
                   <div style={styles.summaryTitle}>Boulanger</div>
-                  <SummaryList items={items} productById={productById} dept="boulanger" />
+                  <SummaryList items={initialDisplayItems} resolveProduct={resolveProduct} dept="boulanger" />
                 </div>
                 <div style={styles.summaryBox}>
                   <div style={styles.summaryTitle}>Pâtissier</div>
-                  <SummaryList items={items} productById={productById} dept="patiss" />
+                  <SummaryList items={initialDisplayItems} resolveProduct={resolveProduct} dept="patiss" />
                 </div>
               </div>
 
               <div style={{ marginTop: 12, display: "flex", justifyContent: "center" }}>
                 <button
-                  onClick={openProducts}
+                  onClick={openOrderEditor}
                   disabled={isSent}
                   style={{
                     ...styles.pillBtn,
@@ -894,7 +1008,7 @@ export default function BecusHome() {
               <div style={{ fontWeight: 900, fontSize: 16 }}>Ajout / Modification</div>
               <div style={{ flex: 1 }} />
 
-              <button onClick={openProducts} style={{ ...styles.pillBtn, background: "#fb923c", color: "#111827" }}>
+              <button onClick={openOrderEditor} style={{ ...styles.pillBtn, background: "#fb923c", color: "#111827" }}>
                 ✏️ Modifier / Ajouter
               </button>
 
@@ -931,7 +1045,7 @@ export default function BecusHome() {
                     {pendingDelta.add.length ? (
                       pendingDelta.add.map((a) => (
                         <div key={`add_${a.product_id}`} style={styles.deltaRow}>
-                          <span style={styles.deltaEmoji}>{productEmoji(productById[a.product_id]) || "📦"}</span>
+                          <span style={styles.deltaEmoji}><ProductIcon p={resolveProduct(a.product_id)} size={22} /></span>
                           <span style={styles.deltaName} title={productName(productById[a.product_id])}>
                             {productName(productById[a.product_id])}
                           </span>
@@ -948,7 +1062,7 @@ export default function BecusHome() {
                     {pendingDelta.down.length ? (
                       pendingDelta.down.map((d) => (
                         <div key={`down_${d.product_id}`} style={styles.deltaRow}>
-                          <span style={styles.deltaEmoji}>{productEmoji(productById[d.product_id]) || "📦"}</span>
+                          <span style={styles.deltaEmoji}><ProductIcon p={resolveProduct(d.product_id)} size={22} /></span>
                           <span style={styles.deltaName} title={productName(productById[d.product_id])}>
                             {productName(productById[d.product_id])}
                           </span>
@@ -1005,9 +1119,8 @@ export default function BecusHome() {
               <div style={styles.smallMeta}>(Coche les produits non reçus: ils seront ajoutés à la semaine prochaine)</div>
               <div style={{ marginTop: 10, display: "grid", gap: 8 }}>
                 {prevItems.map((it) => {
-                  const p = productById[it.product_id];
+                  const p = resolveProduct(it.product_id);
                   const name = productName(p);
-                  const emoji = productEmoji(p) || "📦";
                   const checked = !!missing[it.product_id];
 
                   return (
@@ -1020,7 +1133,7 @@ export default function BecusHome() {
                           setMissing((prev) => ({ ...prev, [it.product_id]: v }));
                         }}
                       />
-                      <span style={{ width: 22, textAlign: "center" }}>{emoji}</span>
+                      <ProductIcon p={p} size={22} />
                       <span style={styles.deltaName} title={name}>
                         {name}
                       </span>
@@ -1053,10 +1166,10 @@ export default function BecusHome() {
   );
 }
 
-function SummaryList({ items, productById, dept }) {
+function SummaryList({ items, resolveProduct, dept }) {
   const rows = (items || [])
     .map((it) => {
-      const p = productById[it.product_id];
+      const p = resolveProduct(it.product_id);
       if (normDept(p?.dept) !== dept) return null;
       return { id: it.product_id, qty: it.qty, p };
     })
@@ -1068,7 +1181,7 @@ function SummaryList({ items, productById, dept }) {
     <div style={{ display: "grid", gap: 6, minWidth: 0 }}>
       {rows.map((r) => (
         <div key={r.id} style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
-          <span style={{ width: 20, textAlign: "center" }}>{productEmoji(r.p) || "📦"}</span>
+          <ProductIcon p={r.p} size={20} />
           <span
             style={{
               flex: 1,

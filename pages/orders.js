@@ -1,11 +1,9 @@
 // pages/orders.js
-/* UX (additif après envoi) — v-orders-additive-delta-ui-split-2025-10-21
-   - Séparation VISUELLE : "Commande initiale (envoyée)" (baseline) vs "Rajout (delta)"
-   - En mode 'sent' : INSERT UNIQUEMENT les deltas (jamais d’UPDATE) — inchangé
-   - NE PLUS ABSORBER les deltas dans le "baseline" local : la notion de "Rajout" reste visible
-   - Verrouillage minimum = baseline (impossible de baisser en dessous après envoi)
-   - Auto-sauvegarde (draft = replace, sent = insert deltas)
-   - L’envoi WhatsApp (initial et rajout) se fait depuis l’accueil (index.js)
+/* UX (additif après envoi) — v-orders-2025-10-23-fix-hydration
+   - Fix: plus de reset de la sélection au premier clic (StrictMode)
+   - Baseline: libellé dynamique (prévue vs envoyée)
+   - Auto-sauvegarde: localStorage + Supabase
+   - Ajout cleanSelectedMap
 */
 
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -15,12 +13,29 @@ import { useRouter } from "next/router";
 import { supabase } from "../lib/supabaseClient";
 import { fmtISODate } from "../lib/date";
 
-const BUILD_TAG = "v-orders-additive-delta-ui-split-2025-10-21";
+// Normalisation robuste du fournisseur depuis l'URL (AUCUN fallback vers Bécus)
+function normalizeSupplier(raw) {
+  const k = String(raw || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/\p{Diacritic}/gu, "")
+    .replace(/[^a-z0-9]/g, "");
+
+  if (!k) return ""; // inconnu => vide
+
+  if (k.includes("becus") || k.includes("becos")) return "becus";
+  if (k === "cdp" || k.includes("coupdepates") || (k.includes("coup") && k.includes("pate"))) return "coupdepates";
+  if (k === "mb" || k.includes("moulin") || k.includes("bourgeois")) return "moulins";
+
+  return ""; // inconnu => vide
+}
+
+const BUILD_TAG = "v-orders-2025-10-23-fix-hydration";
 
 const ORDER_COLUMNS = "id,status,delivery_date,supplier_key,supplier,sent_at,cutoff_at,created_at";
 const SUPPLIERS = [
-  { key: "becus",       label: "Bécus",         enabled: true,  allowedWeekdays: [4] },   // jeudi
-  { key: "coupdepates", label: "Coup de Pâtes", enabled: false, allowedWeekdays: [3,5] }, // mercredi, vendredi
+  { key: "becus",       label: "Bécus",             enabled: true, allowedWeekdays: [4] },   // jeudi
+  { key: "coupdepates", label: "Coup de Pâtes",     enabled: true, allowedWeekdays: [3,5] }, // mercredi, vendredi
+  { key: "moulins",     label: "Moulins Bourgeois", enabled: true, allowedWeekdays: [4] },
 ];
 const TABS = [
   { key: "all", label: "Toutes" },
@@ -37,10 +52,8 @@ const dayBefore = (isoDate) => { const d = new Date(`${isoDate}T00:00:00`); d.se
 const safeDept = (d) => (d ? String(d).toLowerCase() : "uncat");
 const withDefaults = (rows=[]) => rows.map(r => ({ ...r, emoji: r.emoji || "🧺", dept: safeDept(r.dept) }));
 const supplierLabel = (k) => (SUPPLIERS.find(x => x.key === k)?.label) || k || "—";
-const dayNameFR = (n) => ["dimanche","lundi","mardi","mercredi","jeudi","vendredi","samedi"][n];
 const formatHumanDate = (iso) => new Date(iso).toLocaleDateString("fr-FR", { weekday: "long", day: "2-digit", month: "long" });
 const isValidOrderId = (v) => (typeof v === "string" ? v.length>0 : typeof v === "number" ? Number.isFinite(v) : false);
-const normalize = (s) => (s ?? "").toString().toLowerCase().normalize("NFD").replace(/\p{Diacritic}/gu, "").trim();
 
 // Transforme n’importe quel libellé en clé canonique
 function deptKey(x = "") {
@@ -104,24 +117,59 @@ function compressByProduct(items=[]) {
   return Array.from(sums.entries()).map(([product_id, qty]) => ({ product_id, qty }));
 }
 
+// Nettoyage sûr d’un draft local
+function cleanSelectedMap(obj){
+  const out = {};
+  if (obj && typeof obj === "object") {
+    for (const [pid, v] of Object.entries(obj)) {
+      const qty = Math.max(0, Number(v?.qty) || 0);
+      const checked = !!v?.checked && qty > 0;
+      out[String(pid)] = { checked, qty };
+    }
+  }
+  return out;
+}
+
 /* ------------------ Page ------------------ */
 export default function OrdersPage() {
   const router = useRouter();
   const ready = router.isReady;
 
-  // URL -> état
-  const [supplier, setSupplier] = useState(SUPPLIERS[0].key);
+  // URL -> état (clé canonique) — pas de défaut sur Bécus
+  const [supplier, setSupplier] = useState(""); // ⬅️ vide au démarrage
   const [delivery, setDelivery] = useState(suggestNextThursdayISO());
   useEffect(() => {
     if (!ready) return;
-    const s = (router.query.supplier ?? SUPPLIERS[0].key).toString();
-    const d = (router.query.delivery ?? "").toString();
-    setSupplier(s || SUPPLIERS[0].key);
-    setDelivery(d || suggestNextThursdayISO());
+    const s = normalizeSupplier((router.query.supplier ?? "").toString());
+    const d = (router.query.delivery ?? "").toString() || suggestNextThursdayISO();
+    setSupplier(s); // restera "" si non fourni / non reconnu
+    setDelivery(d);
   }, [ready, router.query.supplier, router.query.delivery]);
+
+  // Retour intelligent (si on vient d'une page fournisseur)
+  const backHref = useMemo(() => {
+    const q = router.query || {};
+    const raw = Array.isArray(q.back) ? q.back[0] : q.back;
+    const b = (raw ? String(raw) : "").trim();
+    if (b) return b;
+    if (supplier) return `/suppliers/${supplier}`;
+    return "/";
+  }, [router.query?.back, supplier]);
+
+  const backLabel = useMemo(() => {
+    if (backHref.startsWith("/suppliers/")) {
+      const k = backHref.split("/")[2] || "";
+      return `← ${supplierLabel(k) || "Retour"}`;
+    }
+    return "← Accueil";
+  }, [backHref]);
+
 
   // Clé de sauvegarde locale
   const draftKey = useMemo(() => `orders_draft_${supplier}_${delivery}`, [supplier, delivery]);
+
+  // Clé stash WhatsApp pour index.js
+  const waStashKey = useMemo(() => `wa_payload_${supplier}_${delivery}`, [supplier, delivery]);
 
   // Mode Réception (#reception)
   const [isReception, setIsReception] = useState(false);
@@ -154,7 +202,7 @@ export default function OrdersPage() {
 
   const [hydrated, setHydrated] = useState(false);
 
-  // Recadrage date (mode normal uniquement) — Bécus = jeudi (pas d’input)
+  // Recadrage date (mode normal uniquement)
   useEffect(() => {
     if (!delivery || !meta?.allowedWeekdays?.length) return;
     if (isReception) return;
@@ -164,101 +212,48 @@ export default function OrdersPage() {
     }
   }, [supplier, delivery, meta?.allowedWeekdays, isReception]);
 
-  /* ---------- Sélecteurs dynamiques (tolèrent colonnes manquantes) ---------- */
-  async function pickProductsSelect() { return { sel: "*" }; }
-
-  /* ------------- CHARGE Produits (mode normal) ------------- */
+  /* ------------- CHARGE Produits (mode normal) — STRICT supplier_key ------------- */
   useEffect(() => {
     if (!ready) return;
     if (isReception) return;
+
+    // Purge immédiate pour éviter tout "reliquat"
+    setProducts([]);
+
     (async () => {
-      if (!supplier) return;
-      const { sel } = await pickProductsSelect();
-      const label = supplierLabel(supplier);
-      let data = [];
+      if (!supplier) return; // rien tant que la clé n'est pas connue
+      try {
+        const { data, error } = await supabase
+          .from("products")
+          .select("*")
+          .eq("supplier_key", supplier); // filtre strict
 
-      // 1) supplier_key
-      let r1 = await supabase.from("products").select(sel).eq("supplier_key", supplier).limit(2000);
-      if (!r1.error) data = r1.data || [];
+        if (error) throw error;
 
-      // 2) supplier label exact
-      if ((data || []).length === 0) {
-        let r2 = await supabase.from("products").select(sel).eq("supplier", label).limit(2000);
-        if (!r2.error) data = r2.data || [];
-      }
+        const list = (data || [])
+          .filter(p => p.archived !== true && p.active !== false)
+          .sort((a,b) => (a.name||"").localeCompare(b.name||""));
 
-      // 3) ilike
-      if ((data || []).length === 0) {
-        let r3 = await supabase.from("products").select(sel).ilike("supplier", `%${supplier}%`).limit(2000);
-        if (!r3.error) data = r3.data || [];
-        if ((data || []).length === 0 && label !== supplier) {
-          let r3b = await supabase.from("products").select(sel).ilike("supplier", `%${label}%`).limit(2000);
-          if (!r3b.error) data = r3b.data || [];
+        setProducts(withDefaults(list));
+
+        // Favoris par fournisseur (indépendant de la liste)
+        const favs = await supabase
+          .from("supplier_favorites")
+          .select("product_id")
+          .eq("supplier_key", supplier)
+          .limit(500);
+        if (!favs.error) setFavorites(new Set((favs.data || []).map(f => f.product_id)));
+
+        if (!list.length) {
+          setUiMsg({ type:"info", text:`Aucun produit pour ${supplierLabel(supplier)} (normal si tu n’en as pas encore créé).` });
         }
+      } catch (e) {
+        setUiMsg({ type:"error", text: "Lecture produits : " + explainSupabaseError(e) });
+        setProducts([]);
+        setFavorites(new Set());
       }
-
-      // 4) fallback (tous)
-      if ((data || []).length === 0) {
-        let r4 = await supabase.from("products").select(sel).limit(2000);
-        if (!r4.error && r4.data) {
-          const target = new Set([normalize(supplier), normalize(label)]);
-          const all = r4.data || [];
-          data = all.filter(p => {
-            const k = normalize(p?.supplier_key);
-            const s = normalize(p?.supplier);
-            return target.has(k) || target.has(s) || (s && (s.includes(normalize(supplier)) || s.includes(normalize(label))));
-          });
-        }
-      }
-
-      // 5) dernier filet : tout actif
-      if ((data || []).length === 0) {
-        let r5 = await supabase.from("products").select(sel).limit(2000);
-        if (!r5.error && r5.data) data = r5.data;
-      }
-
-      data = (data || []).filter(p => p.is_active !== false && p.active !== false);
-      setProducts(withDefaults(data));
-
-      const favs = await supabase
-        .from("supplier_favorites")
-        .select("product_id")
-        .eq('supplier_key', supplier)
-        .limit(500);
-      if (!favs.error) setFavorites(new Set((favs.data || []).map(f => f.product_id)));
     })();
   }, [ready, supplier, isReception]);
-
-  /* --------- SAUVEGARDE LOCALE + RESTAURATION ---------- */
-  const cleanSelectedMap = (obj) => {
-    const out = {};
-    for (const [k,v] of Object.entries(obj || {})) {
-      const ks = String(k); if (!ks || ks==="undefined" || ks==="null") continue;
-      const qty = Math.max(0, Number(v?.qty) || 0);
-      out[ks] = { checked: !!v?.checked && qty > 0, qty };
-    }
-    return out;
-  };
-
-  useEffect(() => {
-    if (!ready || isReception) return;
-    try {
-      const raw = localStorage.getItem(draftKey);
-      if (raw) {
-        const obj = JSON.parse(raw);
-        if (obj && typeof obj === "object" && obj.selected) {
-          setSelected(cleanSelectedMap(obj.selected));
-        }
-      }
-    } catch {}
-  }, [ready, draftKey, isReception]);
-
-  useEffect(() => {
-    if (!ready || isReception) return;
-    try {
-      localStorage.setItem(draftKey, JSON.stringify({ selected, ts: Date.now() }));
-    } catch {}
-  }, [ready, isReception, draftKey, selected]);
 
   /* ------------- CHARGE commande + baseline + items ------------- */
   useEffect(() => {
@@ -292,7 +287,15 @@ export default function OrdersPage() {
   const [serverMap, setServerMap] = useState({});
   useEffect(() => {
     if (!ready) return;
-    if (!order?.id) { setServerMap({}); setBaselineMap({}); setSelected({}); setHydrated(true); return; }
+
+    // ⚠️ IMPORTANT: NE PAS réinitialiser la sélection ici (StrictMode rejoue l'effet)
+    if (!order?.id) {
+      setServerMap({});
+      setBaselineMap({});
+      if (!hydrated) setHydrated(true);
+      return;
+    }
+
     (async () => {
       // 1) CARTOGRAPHIE COURANTE EN BASE
       const { data: items, error } = await supabase
@@ -316,8 +319,7 @@ export default function OrdersPage() {
       for (const it of (base?.items || [])) baseline[String(it.product_id)] = Number(it.qty)||0;
       setBaselineMap(baseline);
 
-      // 3) SÉLECTION INITIALE = état courant (pour l’édition)
-      //    (en 'sent', ça correspond au "baseline + deltas déjà insérés")
+      // 3) SÉLECTION INITIALE = état courant
       const fromServer = Object.fromEntries(
         Object.entries(sums).map(([pid,q]) => [pid, { checked: q > 0, qty: Math.max(1, q) }])
       );
@@ -328,7 +330,6 @@ export default function OrdersPage() {
         const raw = localStorage.getItem(draftKey);
         if (raw) localSel = cleanSelectedMap((JSON.parse(raw)?.selected) || {});
       } catch {}
-      // On prend la quantité la plus haute entre local et server (évite de "baisser" par erreur)
       const merged = { ...fromServer };
       for (const [pid, v] of Object.entries(localSel)) {
         const cur = merged[pid]?.qty || 0;
@@ -336,17 +337,21 @@ export default function OrdersPage() {
         if (v.checked && next > 0) merged[pid] = { checked: true, qty: next };
       }
       setSelected(merged);
-      setHydrated(true);
+      if (!hydrated) setHydrated(true);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, order?.id]);
 
   /* ---------- État 'sent' & cut-off ---------- */
   const isSent = (order?.status || "draft") === "sent";
   const dayBeforeISO = dayBefore(delivery);
   const cutOffDate = useMemo(() => localDateAt(dayBeforeISO, 12, 0), [dayBeforeISO]);
+  const viewParam = useMemo(() => {
+    const v = router.query?.view;
+    return Array.isArray(v) ? v[0] : v;
+  }, [router.query?.view]);
+  const historyReadOnly = (String(viewParam || "") === "history");
   const canModify = useMemo(() => !isSent || new Date() <= cutOffDate, [isSent, cutOffDate]);
-  const readOnly = !canModify;
+  const readOnly = historyReadOnly || !canModify;
 
   /* ------------------ Aides ------------------ */
   const productById = (id) => products.find(p => String(p.id) === String(id));
@@ -392,7 +397,6 @@ export default function OrdersPage() {
         });
       }
     }
-    // tri léger par dept puis nom
     out.sort((a,b)=>{
       if (a.dept !== b.dept) return a.dept.localeCompare(b.dept);
       return a.product_name.localeCompare(b.product_name);
@@ -408,6 +412,51 @@ export default function OrdersPage() {
     const total = lines.reduce((acc, l) => acc + (Number(l.unit_price)||0) * (Number(l.qty)||0), 0);
     return { lines, grouped, total };
   }, [selected, products, order?.id]);
+
+  // -------- STASH WHATSAPP (lisible par index.js, zéro await) --------
+  useEffect(() => {
+    if (!ready || isReception) return;
+    try {
+      const supplier_key = supplier;
+      const supplier_label = supplierLabel(supplier);
+      const delivery_iso = displayDateISO;
+
+      const baseline_compact = Object.entries(baselineMap).map(([product_id, qty]) => ({ product_id, qty }));
+
+      const full_selection = summary.lines.map(l => ({
+        product_id: l.product_id,
+        product_name: l.product_name || (productById(l.product_id)?.name ?? ""),
+        qty: Number(l.qty) || 0
+      }));
+
+      const rajout = rajoutList.map(r => ({
+        product_id: r.product_id,
+        product_name: r.product_name || (productById(r.product_id)?.name ?? ""),
+        delta: Number(r.delta) || 0
+      }));
+
+      const payload = {
+        build_tag: BUILD_TAG,
+        order_id: order?.id || null,
+        supplier_key,
+        supplier_label,
+        delivery_iso,
+        is_sent: isSent,
+        baseline: baseline_compact,
+        selection: full_selection,
+        rajout,
+        ts: Date.now()
+      };
+      localStorage.setItem(waStashKey, JSON.stringify(payload));
+
+      if (typeof window !== "undefined") {
+        window.__WA_STASH_KEY__ = waStashKey;
+        window.__getWaPayload = () => {
+          try { return JSON.parse(localStorage.getItem(waStashKey) || "null"); } catch { return null; }
+        };
+      }
+    } catch {}
+  }, [ready, isReception, waStashKey, supplier, displayDateISO, isSent, baselineMap, rajoutList, summary.lines, order?.id]);
 
   /* ------------------ CRUD / Auto-sauvegarde ------------------ */
   async function ensureOrderDraft() {
@@ -468,8 +517,6 @@ export default function OrdersPage() {
       if (toInsert.length) {
         const ins = await supabase.from("order_items").insert(toInsert);
         if (ins.error) throw new Error(ins.error.message);
-        // ⚠️ NE PAS ABSORBER DANS baselineMap ICI !
-        // C’est l’accueil (index.js) qui "absorbe" le rajout après envoi WhatsApp
       }
     }
 
@@ -483,8 +530,12 @@ export default function OrdersPage() {
   const autosaveTimer = useRef(null);
   const lastSavedKey = useRef("");
 
+  // Auto-sauvegarde Supabase (debounce) + draft local
   useEffect(() => {
     if (!ready || isReception || !supplier || !delivery || !hydrated || !canModify) return;
+
+    // Toujours persister un draft local instantané
+    try { localStorage.setItem(draftKey, JSON.stringify({ selected, ts: Date.now() })); } catch {}
 
     const oId = isValidOrderId(order?.id) ? order.id : null;
     const lines = selectionToItems(oId);
@@ -500,16 +551,13 @@ export default function OrdersPage() {
         await saveOrderItems(o.id);
         lastSavedKey.current = key;
         setUiMsg({ type: "info", text: "Auto-sauvegardé ✅" });
-
-        // ⚠️ IMPORTANT : on NE TOUCHE PLUS à baselineMap ici (sinon on "mange" le rajout visuellement)
-        // Le baseline reste celui sauvegardé lors de l’envoi initial (index.js)
       } catch (e) {
         setUiMsg({ type: "error", text: "Auto-sauvegarde : " + explainSupabaseError(e) });
       }
     }, 600);
 
     return () => clearTimeout(autosaveTimer.current);
-  }, [ready, supplier, delivery, isReception, selected, hydrated, canModify, order?.id]);
+  }, [ready, supplier, delivery, isReception, selected, hydrated, canModify, order?.id, draftKey]);
 
   async function saveNow(redirectHome = true) {
     try {
@@ -518,7 +566,6 @@ export default function OrdersPage() {
       setUiMsg({ type: "success", text: "Commande sauvegardée ✅" });
       try { localStorage.setItem(draftKey, JSON.stringify({ selected, ts: Date.now() })); } catch {}
 
-      // On n’absorbe pas dans baselineMap (voir plus haut)
       if (redirectHome) router.push("/");
     } catch (e) {
       setUiMsg({ type: "error", text: "Sauvegarde : " + explainSupabaseError(e) });
@@ -544,7 +591,7 @@ export default function OrdersPage() {
     <div style={{ maxWidth:1100, margin:"0 auto", padding:16 }}>
       {/* Top bar — 1 ligne */}
       <div style={{ display:"flex", gap:12, alignItems:"center", marginBottom:12, flexWrap:"wrap" }}>
-        <Link href="/"><button style={btnStyleMuted()}>← Accueil</button></Link>
+        <Link href={backHref}><button style={btnStyleMuted()}>{backLabel}</button></Link>
 
         <div style={{ padding:"8px 10px", border:"1px solid #e8e8e8", borderRadius:999, background:"#f9f9f9", fontWeight:800 }}>
           {supplierLabel(supplier)}
@@ -552,6 +599,10 @@ export default function OrdersPage() {
 
         <div style={{ color:"#222", fontWeight:700 }}>
           Livraison : {formatHumanDate(displayDateISO)}
+        </div>
+
+        <div style={{ marginLeft:8, fontSize:11, color:"#666" }}>
+          {BUILD_TAG}
         </div>
 
         <div style={{ flex:1 }} />
@@ -587,7 +638,7 @@ export default function OrdersPage() {
         <div style={{ fontSize:13, color:"#666", marginBottom:8 }}>
           {isSent
             ? <>Commande <b>envoyée</b>. Ajouts possibles jusqu’à <b>J-1 12:00</b> (rajout envoyé depuis l’accueil).</>
-            : <>Sélections auto-sauvegardées. L’<b>envoi</b> se fait depuis l’accueil (“Bécus → WhatsApp”).</>}
+            : <>Sélections auto-sauvegardées. L’<b>envoi</b> se fait depuis l’accueil (WhatsApp/Email sur la bannière fournisseur).</>}
         </div>
       )}
 
@@ -597,7 +648,7 @@ export default function OrdersPage() {
           {/* COMMANDE INITIALE (baseline) */}
           <div style={{ background:"#fff", border:"1px solid #eee", borderRadius:12, padding:12, margin:"12px 0" }}>
             <div style={{ fontWeight:800, marginBottom:10, display:"flex", justifyContent:"space-between" }}>
-              <span>🧾 Commande initiale (envoyée)</span>
+              <span>🧾 Commande initiale ({isSent ? "envoyée" : "prévue"})</span>
               <span style={badgeStyle()}>{Object.keys(baselineMap).length} ligne(s)</span>
             </div>
             {Object.keys(baselineMap).length === 0 ? (
@@ -707,7 +758,7 @@ export default function OrdersPage() {
 
               return (
                 <div key={pid} style={productStyle(isOn)}>
-                  {/* Checkbox : ne doit pas permettre de descendre en-dessous du baseline */}
+                  {/* Checkbox */}
                   <input
                     type="checkbox"
                     checked={isOn}
@@ -716,7 +767,6 @@ export default function OrdersPage() {
                         const old = prev[pid] || { checked: false, qty: Math.max(1, b || 1) };
                         const nextChecked = !old.checked;
                         if (!nextChecked) {
-                          // Si on décoche un produit "locké", on revient au baseline (pas 0)
                           if (locked) return { ...prev, [pid]: { checked:true, qty: b || 1 } };
                           return { ...prev, [pid]: { checked:false, qty:0 } };
                         }
@@ -763,7 +813,7 @@ export default function OrdersPage() {
         </div>
       )}
 
-      {/* --------- RÉSUMÉ GLOBAL (facultatif, comme avant) --------- */}
+      {/* --------- RÉSUMÉ GLOBAL --------- */}
       {!isReception && (
         <div id="resume" style={{ background:"#fff", border:"1px solid #eee", borderRadius:12, padding:12, margin:"12px 0" }}>
           <div style={{ fontWeight:800, marginBottom:10 }}>
@@ -851,14 +901,53 @@ export default function OrdersPage() {
   );
 }
 
-/* ------------------ helpers visuels ------------------ */
+// helper à coller au-dessus de renderThumb
+function pickRawUrl(p){
+  const raw =
+    p?.image_url || p?.photo_url || p?.image || p?.thumbnail ||
+    p?.photo || p?.url_photo || p?.imageUrl || p?.imageURL ||
+    p?.picture || p?.pic || p?.url || null;
+  if (!raw) return null;
+
+  const s = String(raw);
+
+  // Si on a une URL d'optimiseur Next.js d'un AUTRE site, on déballe ?url=...
+  if (s.includes("/_next/image") && s.includes("url=")) {
+    const m = s.match(/[?&]url=([^&]+)/);
+    if (m && m[1]) {
+      try {
+        let inner = decodeURIComponent(m[1]);
+        if (inner.startsWith("//")) inner = "https:" + inner;
+        return inner;
+      } catch {}
+    }
+  }
+
+  // normalise les URLs protocole-relatives
+  if (s.startsWith("//")) return "https:" + s;
+  return s;
+}
+
 function renderThumb(p){
-  const url = p?.image_url || p?.photo_url || p?.image || p?.thumbnail || p?.photo || p?.url_photo || p?.imageUrl || p?.imageURL || p?.picture || p?.pic || p?.url || null;
+  const url = pickRawUrl(p);
   const emoji = p?.emoji;
-  if (url) return <img src={url} alt="" style={{ width:28, height:28, objectFit:"cover", borderRadius:6, border:"1px solid #eee" }} />;
+
+  if (url) {
+    return (
+      <img
+        src={url}
+        alt=""
+        referrerPolicy="no-referrer"
+        onError={(e)=>{ e.currentTarget.style.display = "none"; }}
+        style={{ width:28, height:28, objectFit:"cover", borderRadius:6, border:"1px solid #eee" }}
+      />
+    );
+  }
   if (emoji) return <span aria-hidden style={{ fontSize:20, width:24, textAlign:"center" }}>{emoji}</span>;
   return <span aria-hidden style={{ fontSize:18, opacity:0.4 }}>🍞</span>;
 }
+
+/* ------------------ helpers visuels ------------------ */
 
 function QtySelect({ value, min=1, disabled, onChange }){
   const vNum = Number(value) || 0;

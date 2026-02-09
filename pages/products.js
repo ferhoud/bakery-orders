@@ -1,654 +1,864 @@
 // pages/products.js
+import { useEffect, useMemo, useState } from "react";
 import Head from "next/head";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/router";
 import { supabase } from "../lib/supabaseClient";
 
-/* =============== Thème clair (fond blanc) =============== */
-const COLORS = {
-  pageBg:   "#ffffff",
-  ink:      "#0f172a",
-  inkSoft:  "#64748b",
-  line:     "#e5e7eb",
-  cardBg:   "#ffffff",
-  cardLine: "#e5e7eb",
-  primary:  "#4f46e5",
-  accent:   "#7c3aed",
-  success:  "#16a34a",
-  warn:     "#f59e0b",
-  danger:   "#ef4444",
-  neutral:  "#334155",
+/* ---------- suppliers ---------- */
+const SUPPLIERS = [
+  { key: "becus",       label: "Bécus" },
+  { key: "coupdepates", label: "Coup de Pâtes" },
+  { key: "moulins",     label: "Moulins Bourgeois" },
+];
+const supplierLabel = (k) => SUPPLIERS.find(s => s.key === k)?.label || k || "—";
+
+/* ---------- design tokens ---------- */
+const FONT_STACK = `"Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans"`;
+const CARD  = { background: "#fff", border: "1px solid #e6e8ee", borderRadius: 16, padding: 14, boxShadow: "0 8px 24px rgba(15,23,42,.04)" };
+const INPUT = {
+  padding: "12px 14px",
+  border: "1px solid #e6e8ee",
+  borderRadius: 12,
+  width: "100%",
+  fontSize: 15,
+  fontWeight: 500,
+  fontFamily: FONT_STACK,
+  WebkitAppearance: "auto",
+  MozAppearance: "auto",
+  appearance: "auto",
+  backgroundColor: "#fff"
 };
-
-const FONT = "'Manrope','SF Pro Text',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,'Noto Sans',sans-serif";
-
-const PAGE   = { minHeight:"100vh", background:COLORS.pageBg, color:COLORS.ink, padding:"24px 16px", fontFamily:FONT };
-const WRAP   = { maxWidth:1220, margin:"0 auto", display:"flex", flexDirection:"column", gap:18 };
-const HEADER = { background:"#f8fafc", border:`1px solid ${COLORS.line}`, borderRadius:18, padding:"14px 16px", display:"flex", alignItems:"center", gap:12 };
-const H1     = { fontSize:26, fontWeight:900, letterSpacing:.2 };
-const CARD   = { background:COLORS.cardBg, border:`1px solid ${COLORS.cardLine}`, borderRadius:18, padding:16 };
-const SUB    = { fontSize:13, color:COLORS.inkSoft };
-
-const BTN = (bg=COLORS.primary) => ({
-  background:bg, color:"#fff", border:"1px solid rgba(0,0,0,.06)", borderRadius:12,
-  padding:"12px 16px", fontSize:15, fontWeight:900, letterSpacing:.2,
-  cursor:"pointer", display:"inline-flex", alignItems:"center", gap:10
+const LABEL = { fontSize: 12, fontWeight: 600, color: "#566074", marginBottom: 6, letterSpacing: ".2px", fontFamily: FONT_STACK };
+const BTN = (primary = false) => ({
+  border: "1px solid " + (primary ? "#0ea5e9" : "#e6e8ee"),
+  background: primary ? "#0ea5e9" : "#fff",
+  color: primary ? "#fff" : "#0f172a",
+  borderRadius: 12,
+  padding: "10px 14px",
+  fontWeight: 600,
+  fontSize: 14,
+  letterSpacing: ".2px",
+  cursor: "pointer",
+  boxShadow: primary ? "0 8px 24px rgba(14,165,233,.18)" : "0 2px 6px rgba(15,23,42,.04)",
+  fontFamily: FONT_STACK
 });
-const BTNO = () => ({ ...BTN("#f1f5f9"), color:COLORS.ink, border:`1px solid ${COLORS.line}` });
+const BTN_DANGER = {
+  border: "1px solid #ef4444",
+  background: "#ef4444",
+  color: "#fff",
+  borderRadius: 12,
+  padding: "10px 14px",
+  fontWeight: 700,
+  fontSize: 14,
+  letterSpacing: ".2px",
+  cursor: "pointer",
+  boxShadow: "0 8px 24px rgba(239,68,68,.18)",
+  fontFamily: FONT_STACK
+};
+const CHIP = (active) => ({
+  border: "1px solid " + (active ? "#0ea5e9" : "#e6e8ee"),
+  background: active ? "#e7f5ff" : "#fff",
+  color: active ? "#075985" : "#0f172a",
+  borderRadius: 999,
+  padding: "8px 14px",
+  fontWeight: 600,
+  fontSize: 14,
+  letterSpacing: ".2px",
+  cursor: "pointer",
+  fontFamily: FONT_STACK
+});
 
-const CHIP = (bg,ink) => ({ background:bg, color:ink, border:`1px solid ${COLORS.line}`, borderRadius:999, padding:"6px 10px", fontSize:12, fontWeight:900 });
-
-const INPUT  = { padding:"12px 12px", borderRadius:10, border:`1px solid ${COLORS.line}`, background:"#fff", color:COLORS.ink, fontSize:15, width:"100%" };
-const SELECT = { ...INPUT };
-const CHECK  = { width:18, height:18 };
-
-/* =============== Métier =============== */
-const FALLBACK_SUPPLIERS = [
-  { key:"becus",       label:"Bécus" },
-  { key:"coupdepates", label:"Coup de Pâtes" }
-];
-const DEPT_OPTIONS = [
-  { key:"patiss",    label:"Pâtisserie" },
-  { key:"boulanger", label:"Boulangerie" },
-  { key:"vente",     label:"Vente" },
-];
-
-function deptKeyLabel(k){ return DEPT_OPTIONS.find(x=>x.key===k)?.label ?? k ?? "—"; }
-function deptFromRow(p){ return p?.dept ?? p?.department ?? p?.departement ?? p?.category ?? p?.categorie ?? p?.type ?? p?.section ?? p?.family ?? p?.famille ?? ""; }
-function supplierLabel(key, list){ return list.find(s=>s.key===key)?.label || key || "—"; }
-
-/* -------- SELECT tolérant (retire les colonnes absentes) -------- */
-async function pickProductsSelect() {
-  let cols = [
-    "id","name","price",
-    "dept","department","departement","category","categorie","type","section","family","famille",
-    "supplier_key","supplier",
-    "is_active","active",
-    "icon","image_url" // optionnelles
-  ];
-  let sel = cols.join(",");
-  let available = new Set(cols);
-  for (let i=0;i<10;i++){
-    const { error } = await supabase.from("products").select(sel).limit(1);
-    if (!error) break;
-    const m = /column\s+(?:\w+\.)?([a-zA-Z_]\w*)\s+does not exist/i.exec(error?.message||"");
-    if (!m) break;
-    available.delete(m[1]);
-    cols = cols.filter(c => c !== m[1]);
-    sel = cols.join(",");
-  }
-  if (cols.length === 0) {
-    sel = "id,name,price,dept,supplier_key,supplier,is_active,active";
-    available = new Set(sel.split(","));
-  }
-  return { sel, available };
+/* ---------- utils ---------- */
+function canonSupplier(raw) {
+  const k = String(raw || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[^a-z0-9]/g, "");
+  if (!k) return "becus";
+  if (k.includes("becus") || k.includes("becos")) return "becus";
+  if (k === "cdp" || k.includes("coupdepates") || (k.includes("coup") && k.includes("pate"))) return "coupdepates";
+  if (k === "mb" || k.includes("moulin") || k.includes("bourgeois")) return "moulins";
+  return "becus";
 }
 
-/* --------- Construit un payload qui respecte les colonnes existantes --------- */
-function buildProductPayload(availableCols, {
-  name, price, dept, supplier_key, is_active, image_url, icon
-}) {
-  const p = {};
-  p.name  = (name || "").trim();
-  p.price = price === "" ? null : Number(price);
-
-  // dept → écrit dans la 1ère colonne existante parmi la liste
-  if (availableCols.has("dept"))         p.dept         = dept;
-  else if (availableCols.has("department"))   p.department   = dept;
-  else if (availableCols.has("departement"))  p.departement  = dept;
-  else if (availableCols.has("category"))     p.category     = dept;
-  else if (availableCols.has("categorie"))    p.categorie    = dept;
-  else if (availableCols.has("type"))         p.type         = dept;
-  else if (availableCols.has("section"))      p.section      = dept;
-  else if (availableCols.has("family"))       p.family       = dept;
-  else if (availableCols.has("famille"))      p.famille      = dept;
-
-  // supplier
-  if (availableCols.has("supplier_key")) p.supplier_key = supplier_key;
-  if (availableCols.has("supplier"))     p.supplier     = supplier_key; // compat
-
-  // actif
-  if (availableCols.has("is_active")) p.is_active = !!is_active;
-  if (availableCols.has("active"))    p.active    = !!is_active;
-
-  // médias
-  if (availableCols.has("image_url")) p.image_url = (image_url || "").trim() || null;
-  if (availableCols.has("icon"))      p.icon      = (icon || "").trim() || null;
-
-  return p;
+/* Détermine dynamiquement la clé primaire à utiliser (uuid ou id) */
+function getPkInfo(obj) {
+  if (obj && typeof obj === "object") {
+    if (Object.prototype.hasOwnProperty.call(obj, "uuid") && obj.uuid) return { field: "uuid", value: obj.uuid };
+    if (Object.prototype.hasOwnProperty.call(obj, "id") && (obj.id ?? null) !== null) return { field: "id", value: obj.id };
+  }
+  // Fallback neutre
+  return { field: "uuid", value: obj?.uuid ?? obj?.id ?? null };
 }
 
-/* ===================== Page ===================== */
-export default function ProductsPage(){
-  const [suppliers, setSuppliers] = useState(FALLBACK_SUPPLIERS);
-  const [rows, setRows] = useState([]);
-  const [availableCols, setAvailableCols] = useState(new Set());
+/* ============================================================
+   Page
+   ============================================================ */
+export default function ProductsPage() {
+  const router = useRouter();
+  const activeSupplier = useMemo(() => canonSupplier(router.query.supplier), [router.query.supplier]);
 
-  // Filtres
-  const [filterSupp, setFilterSupp] = useState("all");
-  const [filterDept, setFilterDept] = useState("all");
+  const [products, setProducts] = useState([]);
   const [search, setSearch] = useState("");
-
-  // Form ajout
-  const [fName, setFName] = useState("");
-  const [fPrice, setFPrice] = useState("");
-  const [fDept, setFDept] = useState(DEPT_OPTIONS[0].key);
-  const [fSupp, setFSupp] = useState(FALLBACK_SUPPLIERS[0].key);
-  const [fActive, setFActive] = useState(true);
-  const [fImg, setFImg] = useState("");
-  const [fIcon, setFIcon] = useState("");
-
-  // Sélection
-  const [selected, setSelected] = useState(new Set()); // ids cochés
-
-  // Modale d’édition
-  const [editModal, setEditModal] = useState(null); // {id, ...row}
-  const [saving, setSaving] = useState(false);
-
   const [uiMsg, setUiMsg] = useState(null);
 
-  const filtered = useMemo(()=>{
-    return rows.filter(r=>{
-      const suppKey = r.supplier_key || r.supplier || "";
-      const deptKey = deptFromRow(r);
-      const okSupp = filterSupp==="all" ? true : String(suppKey)===String(filterSupp);
-      const okDept = filterDept==="all" ? true : String(deptKey)===String(filterDept);
-      const q = (search||"").trim().toLowerCase();
-      const okSearch = !q || (r.name||"").toLowerCase().includes(q);
-      return okSupp && okDept && okSearch;
-    });
-  }, [rows, filterSupp, filterDept, search]);
+  // Afficher les archivés
+  const [showArchived, setShowArchived] = useState(false);
 
-  useEffect(()=>{
-    (async ()=>{
-      // fournisseurs
-      let s = [];
-      const { data: sup } = await supabase.from("suppliers").select("key,label,name").order("label", {ascending:true});
-      if (Array.isArray(sup) && sup.length) {
-        s = sup.map(r => ({ key: r.key || (r.name||"").toLowerCase().replace(/\s+/g,""), label: r.label || r.name || r.key || "—" }));
-      } else {
-        s = FALLBACK_SUPPLIERS;
+  // Quick Add
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm] = useState({ name: "", dept: "", unit: "u", price: "", image_url: "" });
+
+  // Edition produit (drawer latéral)
+  // editing: { pkField, pkValue, name, dept, unit(UI), price, image_url, is_active }
+  const [editing, setEditing] = useState(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  // fetch strict by supplier_key (+ is_active si non “archivés”)
+  useEffect(() => {
+    let on = true;
+    (async () => {
+      try {
+        setProducts([]);
+        let q = supabase
+          .from("products")
+          .select("*")
+          .eq("supplier_key", activeSupplier)
+          .order("name", { ascending: true });
+
+        if (!showArchived) {
+          q = q.eq("is_active", true);
+        }
+
+        const { data, error } = await q.limit(2000);
+        if (error) throw error;
+
+        const list = (data || []);
+        if (on) setProducts(list);
+      } catch (e) {
+        if (on) setUiMsg({ type: "error", text: "Lecture produits : " + (e?.message || String(e)) });
       }
-      setSuppliers(s);
-      if (s.length) setFSupp(s[0].key);
-
-      await reloadProducts();
     })();
-  }, []);
+    return () => { on = false; };
+  }, [activeSupplier, showArchived]);
 
-  async function reloadProducts(){
-    const { sel, available } = await pickProductsSelect();
-    setAvailableCols(available);
-    const res = await supabase.from("products").select(sel).order("name", {ascending:true}).limit(3000);
-    if (res.error) {
-      console.error(res.error);
-      setUiMsg({ type:"error", text:"Erreur lecture produits : " + res.error.message });
-      setRows([]);
-      return;
-    }
-    setRows(res.data || []);
-    setSelected(new Set());
-    setEditModal(null);
+  const filtered = useMemo(() => {
+    const s = (search || "").trim().toLowerCase();
+    return (products || []).filter(p => !s || (p.name || "").toLowerCase().includes(s));
+  }, [products, search]);
+
+  async function addProduct() {
+    const name = form.name.trim();
+    if (!name) { setUiMsg({ type: "error", text: "Nom requis" }); return; }
+    const payload = {
+      name,
+      dept: form.dept || null,
+      // unit: form.unit,            // la colonne n'existe pas en DB
+      price: form.price !== "" ? Number(form.price) : null,
+      image_url: form.image_url || null,
+      supplier_key: activeSupplier,
+      is_active: true
+    };
+    const { data, error } = await supabase
+.from("products")
+.insert(payload).select("*").single();
+    if (error) { setUiMsg({ type: "error", text: "Ajout : " + error.message }); return; }
+    setProducts(p => [data, ...p].sort((a, b) => (a.name || "").localeCompare(b.name || "")));
+    setShowAdd(false);
+    setForm({ name: "", dept: "", unit: "u", price: "", image_url: "" });
+    setUiMsg({ type: "success", text: "Produit ajouté ✅" });
   }
 
-  /* ---------- Ajout ---------- */
-  async function handleAdd(){
-    const payload = buildProductPayload(availableCols, {
-      name: fName,
-      price: fPrice,
-      dept: fDept,
-      supplier_key: fSupp,
-      is_active: fActive,
-      image_url: fImg,
-      icon: fIcon
+  async function updateProductByPk(pkField, pkValue, patch) {
+    if (pkValue == null) { setUiMsg({ type:"error", text:"Clé du produit introuvable." }); return null; }
+    const { data, error } = await supabase
+      .from("products")
+      .update(patch)
+      .eq(pkField, pkValue)
+      .select("*")
+      .single();
+    if (error) { setUiMsg({ type: "error", text: "Sauvegarde : " + error.message }); return null; }
+    setProducts(list => list.map(x => (x[pkField] === pkValue ? data : x)));
+    return data;
+  }
+
+  function startEdit(product) {
+    if (editing) {
+      const { pkField, pkValue } = editing;
+      if (!(pkField === getPkInfo(product).field && pkValue === getPkInfo(product).value)) {
+        const ok = confirm("Remplacer l'édition en cours ? Les modifications non enregistrées seront perdues.");
+        if (!ok) return;
+      }
+    }
+    const { field: pkField, value: pkValue } = getPkInfo(product);
+    setEditing({
+      pkField,
+      pkValue,
+      name: product.name || "",
+      dept: product.dept || "",
+      unit: product.unit || "u", // UI only
+      price: product.price ?? 0,
+      image_url: product.image_url || product.photo_url || "",
+      is_active: product.is_active !== false // défaut: actif
     });
-    if (!payload.name) return alert("Nom obligatoire.");
-
-    const { error } = await supabase.from("products").insert(payload);
-    if (error) return alert("Erreur ajout: " + error.message);
-
-    setFName(""); setFPrice(""); setFDept(DEPT_OPTIONS[0].key);
-    setFSupp(suppliers[0]?.key||""); setFActive(true); setFImg(""); setFIcon("");
-    await reloadProducts();
+    // plus de scrollTo() ici -> le drawer apparaît où que tu sois
   }
 
-  /* ---------- Sélection ---------- */
-  function toggleAll(e){
-    const checked = e.target.checked;
-    if (!checked) return setSelected(new Set());
-    setSelected(new Set(filtered.map(r => r.id)));
-  }
-  function toggleOne(id){
-    setSelected(prev=>{
-      const n = new Set(prev);
-      if (n.has(id)) n.delete(id); else n.add(id);
-      return n;
-    });
-  }
+  async function saveEdit() {
+    if (!editing) return;
+    setSavingEdit(true);
 
-  /* ---------- Suppression ---------- */
-  async function bulkDelete(){
-    const ids = Array.from(selected);
-    if (ids.length === 0) return;
-    if (!confirm(`Supprimer ${ids.length} produit(s) ?`)) return;
-    const { error } = await supabase.from("products").delete().in("id", ids);
-    if (error) {
-      const msg = /row-level security/i.test(error.message||"")
-        ? "Suppression bloquée par RLS : ajoute des policies sur la table products."
-        : error.message;
-      return alert("Erreur suppression : " + msg);
-    }
-    await reloadProducts();
-  }
+    // Patch (sans unit, qui n'existe pas en DB)
+    const patch = {
+      name: (editing.name || "").trim(),
+      dept: editing.dept || null,
+      price: editing.price !== "" ? Number(editing.price) : null,
+      image_url: editing.image_url || null
+      // is_active : géré à part
+    };
 
-  /* ---------- Edition (modale) ---------- */
-  function openEditFromSelection(){
-    if (selected.size !== 1) return;
-    const id = Array.from(selected)[0];
-    const r = rows.find(x => String(x.id) === String(id));
-    if (!r) return;
-    openEdit(r);
-  }
-  function openEdit(r){
-    setEditModal({
-      id: r.id,
-      name: r.name || "",
-      price: r.price ?? "",
-      dept: deptFromRow(r) || DEPT_OPTIONS[0].key,
-      supplier_key: r.supplier_key || r.supplier || suppliers[0]?.key || "",
-      is_active: r.is_active !== false && r.active !== false,
-      image_url: r.image_url || "",
-      icon: r.icon || ""
-    });
-  }
-
-  async function saveEdit(){
-    if (!editModal) return;
-    setSaving(true);
-    try{
-      const payload = buildProductPayload(availableCols, {
-        name: editModal.name,
-        price: editModal.price,
-        dept: editModal.dept,
-        supplier_key: editModal.supplier_key,
-        is_active: editModal.is_active,
-        image_url: editModal.image_url,
-        icon: editModal.icon
-      });
-
-      const { error } = await supabase.from("products").update(payload).eq("id", editModal.id);
-      if (error) throw error;
-
-      setEditModal(null);
-      await reloadProducts();
-    }catch(e){
-      alert("Erreur modification : " + (e.message || e));
-    }finally{
-      setSaving(false);
+    const updated = await updateProductByPk(editing.pkField, editing.pkValue, patch);
+    setSavingEdit(false);
+    if (updated) {
+      setEditing(null);
+      setUiMsg({ type: "success", text: "Produit modifié ✅" });
     }
   }
 
-  // Upload optionnel vers Supabase Storage (si bucket existe)
-  async function tryUploadToStorage(file){
-    try{
-      const bucket = "product-images";
-      const ext = (file.name.split(".").pop() || "jpg").toLowerCase();
-      const path = `p_${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
-      const { error: upErr } = await supabase.storage.from(bucket).upload(path, file, { upsert:false, cacheControl:"3600" });
-      if (upErr) throw upErr;
-      const { data: pub } = await supabase.storage.from(bucket).getPublicUrl(path);
-      return pub?.publicUrl || "";
-    }catch(e){
-      console.warn("Upload storage échoué:", e?.message||e);
-      setUiMsg({ type:"error", text:"Upload non configuré. Colle l’URL de l’image à la place." });
-      return "";
+  function cancelEdit() {
+    setEditing(null);
+  }
+
+  async function toggleArchiveInEdit() {
+    if (!editing) return;
+    const target = !editing.is_active;
+    const ok = target
+      ? confirm(`Archiver "${editing.name}" ?`)
+      : confirm(`Restaurer "${editing.name}" ?`);
+    if (!ok) return;
+
+    const updated = await updateProductByPk(editing.pkField, editing.pkValue, { is_active: !editing.is_active });
+    if (updated) {
+      setEditing(v => v ? { ...v, is_active: updated.is_active } : v);
+      setUiMsg({ type: "success", text: target ? "Archivé ✅" : "Restauré ✅" });
     }
   }
 
-  const showIconCol  = availableCols.has("icon");
-  const showImageCol = availableCols.has("image_url");
+  async function hardDeleteInEdit() {
+    if (!editing) return;
+    const danger = confirm(`Supprimer DÉFINITIVEMENT "${editing.name}" ? (irréversible)`);
+    if (!danger) return;
+
+    const { error } = await supabase
+      .from("products")
+      .delete()
+      .eq(editing.pkField, editing.pkValue);
+
+    if (error) { setUiMsg({ type:"error", text:"Suppression : " + error.message }); return; }
+
+    setProducts(list => list.filter(x => x[editing.pkField] !== editing.pkValue));
+    setEditing(null);
+    setUiMsg({ type:"success", text:"Supprimé 🗑️" });
+  }
+
+  const goSupplier = (k) =>
+    router.push(
+      { pathname: "/products", query: { supplier: k } },
+      undefined,
+      { shallow: true }
+    );
 
   return (
-    <div style={PAGE}>
-      {/* Police */}
+    <div style={{ maxWidth: 1100, margin: "0 auto", padding: 16 }}>
       <Head>
+        {/* Inter (variable) pour un rendu moderne et doux */}
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-        <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800;900&display=swap" rel="stylesheet" />
-        <title>Produits</title>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
       </Head>
 
-      <div style={WRAP}>
-        {/* Header */}
-        <div style={HEADER}>
-          <h1 style={H1}>Produits</h1>
-          <div style={{ marginLeft:"auto", display:"flex", gap:8, flexWrap:"wrap" }}>
-            <Link href="/"><button style={BTNO()}>← Accueil</button></Link>
-            <Link href="/admin/suppliers"><button style={{ ...BTNO(), borderColor:COLORS.line }}>🛠️ Admin fournisseurs</button></Link>
-          </div>
-        </div>
+      {/* top bar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+        <Link href="/"><button style={{ ...BTN(false) }}>← Accueil</button></Link>
+        {typeof router.query.back === "string" && router.query.back ? (
+          <Link href={router.query.back}><button style={{ ...BTN(false) }}>↩ Retour</button></Link>
+        ) : null}
 
-        {/* Bandeau “Ajouter un produit” */}
-        <div style={CARD}>
-          <div style={{ fontWeight:900, fontSize:18, marginBottom:8 }}>Ajouter un produit</div>
-          <div style={{ display:"grid", gap:12 }}>
-            <div style={{ display:"grid", gap:12, gridTemplateColumns:`${showIconCol||showImageCol ? "auto " : ""} 2fr 1fr 1fr 1fr 1fr` }}>
-              {(showIconCol || showImageCol) && (
-                <div>
-                  <label style={SUB}>{showIconCol ? "Icône (emoji)" : "Image"}</label>
-                  {showIconCol && (
-                    <input
-                      style={{ ...INPUT, width:90, textAlign:"center", fontSize:24 }}
-                      placeholder="🥐"
-                      value={fIcon}
-                      onChange={e=>setFIcon(e.target.value)}
-                      title="Mets un emoji (ex: 🥐)"
-                    />
-                  )}
-                </div>
-              )}
-              <div>
-                <label style={SUB}>Nom du produit</label>
-                <input style={INPUT} placeholder="ex. PAIN CHOCOLAT x150" value={fName} onChange={e=>setFName(e.target.value)} />
-              </div>
-              <div>
-                <label style={SUB}>Prix (optionnel)</label>
-                <input style={INPUT} type="number" step="0.01" placeholder="ex. 1.80" value={fPrice} onChange={e=>setFPrice(e.target.value)} />
-              </div>
-              <div>
-                <label style={SUB}>Département</label>
-                <select style={SELECT} value={fDept} onChange={e=>setFDept(e.target.value)}>
-                  {DEPT_OPTIONS.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
-                </select>
-              </div>
-              <div>
-                <label style={SUB}>Fournisseur</label>
-                <select style={SELECT} value={fSupp} onChange={e=>setFSupp(e.target.value)}>
-                  {suppliers.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-                </select>
-              </div>
-              <div>
-                <label style={SUB}>Actif</label>
-                <div style={{ display:"flex", alignItems:"center", gap:10, height:46 }}>
-                  <input style={CHECK} type="checkbox" checked={fActive} onChange={e=>setFActive(e.target.checked)} />
-                  <span style={SUB}>{fActive ? "Oui" : "Non"}</span>
-                </div>
-              </div>
+        <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: ".2px", margin: 0, fontFamily: FONT_STACK }}>
+          Produits — {supplierLabel(activeSupplier)}
+        </h1>
+
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {SUPPLIERS.map(s => (
+            <button
+              key={s.key}
+              aria-pressed={activeSupplier === s.key}
+              onClick={() => goSupplier(s.key)}
+              style={CHIP(activeSupplier === s.key)}
+              disabled={!!editing}
+              title={editing ? "Termine l'édition en cours" : ""}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* toolbar */}
+      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+        <input
+          placeholder="Rechercher un produit…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          style={{ ...INPUT, maxWidth: 520, flex: 1 }}
+          disabled={!!editing}
+        />
+        <button
+          onClick={() => setShowAdd(v => !v)}
+          style={BTN(true)}
+          disabled={!!editing}
+          title={editing ? "Termine l'édition en cours" : ""}
+        >
+          ➕ Ajouter un produit
+        </button>
+
+        <label style={{ display:"inline-flex", alignItems:"center", gap:8 }}>
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={e => setShowArchived(e.target.checked)}
+          />
+          Afficher archivés
+        </label>
+      </div>
+
+      {/* PLUS DE PANNEAU INLINE ICI.
+          On n'affiche plus le gros bloc {editing && <div style={...CARD}>...</div>}
+          Le drawer arrive plus bas ⤵
+      */}
+
+      {/* quick add form */}
+      {showAdd && !editing && (
+        <div style={{ ...CARD, marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, marginBottom: 8, fontFamily: FONT_STACK }}>Ajouter un produit</div>
+          <div className="qa-grid">
+            <div className="qa-wide">
+              <div style={LABEL}>Nom</div>
+              <input
+                value={form.name}
+                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                style={INPUT}
+                placeholder="Ex. Beurre 1kg"
+              />
             </div>
 
-            {showImageCol && (
-              <div style={{ display:"grid", gap:12, gridTemplateColumns:"1fr auto" }}>
-                <div>
-                  <label style={SUB}>URL image (optionnel)</label>
-                  <input style={INPUT} placeholder="https://…/image.jpg" value={fImg} onChange={e=>setFImg(e.target.value)} />
-                </div>
-                <div style={{ display:"flex", alignItems:"end", gap:8 }}>
-                  <label style={{ ...BTN("#f1f5f9"), color:COLORS.ink, cursor:"pointer" }}>
-                    📤 Upload
-                    <input
-                      type="file"
-                      accept="image/*"
-                      style={{ display:"none" }}
-                      onChange={async (e)=>{
-                        const file = e.target.files?.[0];
-                        if (!file) return;
-                        const url = await tryUploadToStorage(file);
-                        if (url) setFImg(url);
-                      }}
-                    />
-                  </label>
-                  <button style={BTN(COLORS.success)} onClick={handleAdd}>➕ Ajouter</button>
-                </div>
-              </div>
-            )}
-
-            {!showImageCol && (
-              <div style={{ display:"flex", justifyContent:"flex-end" }}>
-                <button style={BTN(COLORS.success)} onClick={handleAdd}>➕ Ajouter</button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Filtres / recherche */}
-        <div style={CARD}>
-          <div style={{ fontWeight:900, fontSize:18, marginBottom:8 }}>Rechercher / filtrer les produits</div>
-          <div style={{ display:"grid", gap:12, gridTemplateColumns:"1fr 1fr 2fr" }}>
             <div>
-              <label style={SUB}>Fournisseur</label>
-              <select style={SELECT} value={filterSupp} onChange={e=>setFilterSupp(e.target.value)}>
-                <option value="all">Tous</option>
-                {suppliers.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+              <div style={LABEL}>Dept</div>
+              <select
+                value={form.dept}
+                onChange={e => setForm(f => ({ ...f, dept: e.target.value }))}
+                style={INPUT}
+              >
+                <option value="">— choisir —</option>
+                <option value="vente">vente</option>
+                <option value="patiss">patiss</option>
+                <option value="boulanger">boulanger</option>
               </select>
             </div>
+
             <div>
-              <label style={SUB}>Département</label>
-              <select style={SELECT} value={filterDept} onChange={e=>setFilterDept(e.target.value)}>
-                <option value="all">Tous</option>
-                {DEPT_OPTIONS.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
+              <div style={LABEL}>Unité (affichage)</div>
+              <select
+                value={form.unit}
+                onChange={e => setForm(f => ({ ...f, unit: e.target.value }))}
+                style={INPUT}
+              >
+                <option value="u">u</option>
+                <option value="kg">kg</option>
+                <option value="carton">carton</option>
+                <option value="sac">sac</option>
+                <option value="boite">boite</option>
+                <option value="barquette">barquette</option>
+                <option value="pièce">pièce</option>
               </select>
+              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
+                (Info : l’unité n’est pas enregistrée en base, seulement affichée ici)
+              </div>
             </div>
+
             <div>
-              <label style={SUB}>Rechercher…</label>
-              <input style={INPUT} placeholder="Tape un nom de produit…" value={search} onChange={e=>setSearch(e.target.value)} />
+              <div style={LABEL}>Prix (€)</div>
+              <input
+                type="number"
+                step="0.01"
+                value={form.price}
+                onChange={e => setForm(f => ({ ...f, price: e.target.value }))}
+                style={INPUT}
+                placeholder="0.00"
+              />
             </div>
+
+            <div className="qa-wide">
+              <div style={LABEL}>Image (URL)</div>
+              <input
+                value={form.image_url}
+                onChange={e => setForm(f => ({ ...f, image_url: e.target.value }))}
+                style={INPUT}
+                placeholder="https://…"
+              />
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <button onClick={addProduct} style={BTN(true)}>Enregistrer</button>
+            <button onClick={() => setShowAdd(false)} style={BTN(false)}>Annuler</button>
           </div>
         </div>
+      )}
 
-        {/* Liste + barre d’actions */}
-        <div style={CARD}>
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
-            <div style={{ fontWeight:900, fontSize:18 }}>Catalogue</div>
-            <div style={{ display:"flex", gap:8 }}>
-              <button style={BTN(COLORS.accent)} onClick={openEditFromSelection} disabled={selected.size !== 1}>
-                ✏️ Modifier {selected.size === 1 ? "(1)" : ""}
-              </button>
-              <button style={BTN(COLORS.danger)} onClick={bulkDelete} disabled={selected.size === 0}>
-                🗑️ Supprimer {selected.size > 0 ? `(${selected.size})` : ""}
-              </button>
-            </div>
-          </div>
-
-          <div style={{ width:"100%", overflowX:"auto" }}>
-            <table style={{ width:"100%", borderCollapse:"separate", borderSpacing:0 }}>
-              <thead>
-                <tr style={{ background:"#f8fafc" }}>
-                  {["", "","Nom","Département","Fournisseur","Prix","Actif","Actions"].map((h,i)=>(
-                    <th key={i} style={{ textAlign:"left", padding:"10px 10px", fontSize:13, color:COLORS.inkSoft, borderBottom:`1px solid ${COLORS.cardLine}` }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {/* Ligne “sélectionner tout” */}
-                <tr>
-                  <td style={{ padding:"10px" }}>
-                    <input
-                      type="checkbox"
-                      style={CHECK}
-                      onChange={toggleAll}
-                      checked={filtered.length>0 && filtered.every(r=>selected.has(r.id))}
-                    />
-                  </td>
-                  <td colSpan={7} style={{ padding:"10px", color:COLORS.inkSoft, fontSize:13 }}>
-                    Sélectionner / désélectionner tout (filtre courant)
-                  </td>
-                </tr>
-
-                {filtered.map(r=>{
-                  const dep = deptFromRow(r);
-                  const active = r.is_active !== false && r.active !== false;
-                  const isChecked = selected.has(r.id);
-                  const thumb = (availableCols.has("icon") && r.icon) ? "emoji"
-                                : (availableCols.has("image_url") && r.image_url) ? "img" : null;
-
-                  return (
-                    <tr key={r.id} style={{ borderBottom:`1px solid ${COLORS.cardLine}` }}>
-                      {/* Checkbox */}
-                      <td style={{ padding:"10px" }}>
-                        <input type="checkbox" style={CHECK} checked={isChecked} onChange={()=>toggleOne(r.id)} />
-                      </td>
-
-                      {/* Icône / image */}
-                      <td style={{ padding:"10px", width:50 }}>
-                        {thumb === "emoji" && <span style={{ fontSize:22 }}>{r.icon}</span>}
-                        {thumb === "img"   && <img src={r.image_url} alt="" style={{ width:28, height:28, objectFit:"cover", borderRadius:6, border:`1px solid ${COLORS.line}` }} />}
-                      </td>
-
-                      {/* Nom */}
-                      <td style={{ padding:"10px" }}>
-                        <div style={{ fontWeight:800 }}>{r.name}</div>
-                      </td>
-
-                      {/* Dept */}
-                      <td style={{ padding:"10px" }}>
-                        <span style={CHIP("#f1f5f9", COLORS.ink)}>{deptKeyLabel(dep)}</span>
-                      </td>
-
-                      {/* Supplier */}
-                      <td style={{ padding:"10px" }}>
-                        {supplierLabel(r.supplier_key || r.supplier, suppliers)}
-                      </td>
-
-                      {/* Prix */}
-                      <td style={{ padding:"10px" }}>
-                        {(r.price==null || r.price==="") ? "—" : Number(r.price).toFixed(2)+" €"}
-                      </td>
-
-                      {/* Actif */}
-                      <td style={{ padding:"10px" }}>
-                        <span style={CHIP(active ? "#eafbea" : "#feecec", active ? COLORS.success : COLORS.danger)}>{active ? "Oui" : "Non"}</span>
-                      </td>
-
-                      {/* Actions */}
-                      <td style={{ padding:"10px" }}>
-                        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                          <button style={BTN(COLORS.accent)} onClick={()=>openEdit(r)} disabled={!isChecked} title="Coche la ligne pour modifier">✏️ Modifier</button>
-                          <button style={BTN(COLORS.danger)} onClick={()=>{ setSelected(new Set([r.id])); bulkDelete(); }} disabled={!isChecked} title="Coche la ligne pour supprimer">🗑️ Supprimer</button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-                {filtered.length===0 && (
-                  <tr>
-                    <td colSpan={8} style={{ padding:"14px 10px", color:COLORS.inkSoft }}>Aucun produit trouvé.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* ===== Modale d’édition ===== */}
-        {editModal && (
-          <div style={{
-            position:"fixed", inset:0, background:"rgba(0,0,0,.35)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:50
-          }}>
-            <div style={{ width:"min(720px, 92vw)", background:"#fff", color:COLORS.ink, borderRadius:16, border:`1px solid ${COLORS.line}`, boxShadow:"0 30px 80px rgba(0,0,0,.35)" }}>
-              <div style={{ padding:"14px 16px", borderBottom:`1px solid ${COLORS.line}`, display:"flex", alignItems:"center" }}>
-                <div style={{ fontWeight:900, fontSize:18 }}>Modifier le produit</div>
-                <div style={{ marginLeft:"auto" }}>
-                  <button onClick={()=>setEditModal(null)} style={{ ...BTNO(), padding:"8px 12px" }}>✖ Fermer</button>
-                </div>
-              </div>
-
-              <div style={{ padding:16, display:"grid", gap:12 }}>
-                <div style={{ display:"grid", gap:12, gridTemplateColumns:`${(availableCols.has("icon")||availableCols.has("image_url")) ? "auto " : ""} 2fr 1fr 1fr` }}>
-                  {(availableCols.has("icon") || availableCols.has("image_url")) && (
-                    <div>
-                      <label style={SUB}>{availableCols.has("icon") ? "Icône (emoji)" : "Image"}</label>
-                      {availableCols.has("icon") && (
-                        <input
-                          style={{ ...INPUT, width:90, textAlign:"center", fontSize:26 }}
-                          value={editModal.icon || ""}
-                          placeholder="🥐"
-                          onChange={e=>setEditModal(m=>({ ...m, icon:e.target.value }))}
-                        />
-                      )}
-                    </div>
-                  )}
-                  <div>
-                    <label style={SUB}>Nom</label>
-                    <input style={INPUT} value={editModal.name} onChange={e=>setEditModal(m=>({ ...m, name:e.target.value }))} />
-                  </div>
-                  <div>
-                    <label style={SUB}>Département</label>
-                    <select style={SELECT} value={editModal.dept} onChange={e=>setEditModal(m=>({ ...m, dept:e.target.value }))}>
-                      {DEPT_OPTIONS.map(d => <option key={d.key} value={d.key}>{d.label}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label style={SUB}>Fournisseur</label>
-                    <select style={SELECT} value={editModal.supplier_key} onChange={e=>setEditModal(m=>({ ...m, supplier_key:e.target.value }))}>
-                      {suppliers.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-                    </select>
-                  </div>
-                </div>
-
-                <div style={{ display:"grid", gap:12, gridTemplateColumns:"1fr 1fr 1fr" }}>
-                  <div>
-                    <label style={SUB}>Prix</label>
-                    <input style={INPUT} type="number" step="0.01" value={editModal.price ?? ""} onChange={e=>setEditModal(m=>({ ...m, price:e.target.value }))} />
-                  </div>
-                  <div>
-                    <label style={SUB}>Actif</label>
-                    <div style={{ display:"flex", alignItems:"center", gap:10, height:46 }}>
-                      <input style={CHECK} type="checkbox" checked={!!editModal.is_active} onChange={e=>setEditModal(m=>({ ...m, is_active:e.target.checked }))} />
-                      <span style={SUB}>{editModal.is_active ? "Oui" : "Non"}</span>
-                    </div>
-                  </div>
-                  <div />
-                </div>
-
-                {availableCols.has("image_url") && (
-                  <div style={{ display:"grid", gap:12, gridTemplateColumns:"1fr auto" }}>
-                    <div>
-                      <label style={SUB}>URL image</label>
-                      <input style={INPUT} placeholder="https://…/image.jpg" value={editModal.image_url || ""} onChange={e=>setEditModal(m=>({ ...m, image_url:e.target.value }))} />
-                    </div>
-                    <div style={{ display:"flex", alignItems:"end", gap:8 }}>
-                      <label style={{ ...BTN("#f1f5f9"), color:COLORS.ink, cursor:"pointer" }}>
-                        📤 Upload
-                        <input
-                          type="file"
-                          accept="image/*"
-                          style={{ display:"none" }}
-                          onChange={async (e)=>{
-                            const file = e.target.files?.[0];
-                            if (!file) return;
-                            const url = await tryUploadToStorage(file);
-                            if (url) setEditModal(m=>({ ...m, image_url:url }));
-                          }}
-                        />
-                      </label>
-                      {editModal.image_url && (
-                        <img src={editModal.image_url} alt="" style={{ width:40, height:40, objectFit:"cover", borderRadius:8, border:`1px solid ${COLORS.line}` }} />
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div style={{ padding:"12px 16px", borderTop:`1px solid ${COLORS.line}`, display:"flex", gap:8, justifyContent:"flex-end" }}>
-                <button style={BTNO()} onClick={()=>setEditModal(null)}>Annuler</button>
-                <button style={BTN(COLORS.success)} onClick={saveEdit} disabled={saving}>{saving ? "Enregistrement…" : "💾 Enregistrer"}</button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Toast simple */}
-        {uiMsg && (
-          <div style={{
-            position:"fixed", bottom:18, left:"50%", transform:"translateX(-50%)",
-            background:"#e0f2fe", border:"1px solid #38bdf8", color:COLORS.ink,
-            padding:"10px 14px", borderRadius:12, zIndex:60
-          }}>
-            <span>{uiMsg.text}</span>
-            <button onClick={()=>setUiMsg(null)} style={{ background:"none", border:"none", color:COLORS.ink, textDecoration:"underline", marginLeft:10, cursor:"pointer" }}>Fermer</button>
+      {/* list produits */}
+      <div className="grid">
+        {filtered.map(p => (
+          <ProductCard
+            key={p.uuid ?? p.id}
+            product={p}
+            disabled={!!editing}
+            onStartEdit={() => startEdit(p)}
+          />
+        ))}
+        {filtered.length === 0 && (
+          <div style={{ ...CARD, textAlign: "center", color: "#6b7280", fontFamily: FONT_STACK }}>
+            Aucun produit trouvé pour ce fournisseur.
           </div>
         )}
       </div>
+
+      {/* msg toast en bas */}
+      {uiMsg && (
+        <div style={{
+          position: "fixed", bottom: 16, left: "50%", transform: "translateX(-50%)",
+          background: uiMsg.type === "error" ? "#fdecea" : uiMsg.type === "success" ? "#e6f4ea" : "#eef4ff",
+          border: "1px solid " + (uiMsg.type === "error" ? "#d93025" : uiMsg.type === "success" ? "#34a853" : "#1a73e8"),
+          color: "#0f172a", padding: "10px 14px", borderRadius: 12, boxShadow: "0 10px 30px rgba(0,0,0,.08)", zIndex: 50,
+          fontFamily: FONT_STACK
+        }}>
+          {uiMsg.text}{" "}
+          <button
+            onClick={() => setUiMsg(null)}
+            style={{
+              marginLeft: 8,
+              background: "none",
+              border: "none",
+              textDecoration: "underline",
+              cursor: "pointer",
+              fontFamily: FONT_STACK
+            }}
+          >
+            Fermer
+          </button>
+        </div>
+      )}
+
+      {/* drawer latéral d'édition */}
+      <EditDrawer
+        editing={editing}
+        setEditing={setEditing}
+        savingEdit={savingEdit}
+        onSave={saveEdit}
+        onCancel={cancelEdit}
+        onArchiveToggle={toggleArchiveInEdit}
+        onHardDelete={hardDeleteInEdit}
+      />
+
+      {/* styles */}
+      <style jsx>{`
+        .grid {
+          display: grid;
+          grid-template-columns: repeat(1, minmax(0,1fr));
+          gap: 10px;
+        }
+        @media (min-width: 700px) {
+          .grid {
+            grid-template-columns: repeat(2, minmax(0,1fr));
+          }
+        }
+        @media (min-width: 1000px) {
+          .grid {
+            grid-template-columns: repeat(3, minmax(0,1fr));
+          }
+        }
+
+        .qa-grid {
+          display: grid;
+          grid-template-columns: repeat(1, minmax(0,1fr));
+          gap: 10px;
+        }
+        .qa-wide {
+          grid-column: span 1 / span 1;
+        }
+        @media (min-width: 860px) {
+          .qa-grid {
+            grid-template-columns: 1fr 1fr 1fr;
+          }
+          .qa-wide {
+            grid-column: span 3 / span 3;
+          }
+        }
+      `}</style>
+
+      <style jsx global>{`
+        html, body {
+          font-family: ${FONT_STACK};
+          color: #0f172a;
+          letter-spacing: .1px;
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+          background: #f7f8fb;
+        }
+        button, input, select { font-family: ${FONT_STACK}; }
+        h1, h2, h3 { font-weight: 700; }
+      `}</style>
     </div>
+  );
+}
+
+/* -------- simple card (only Edit; archive/delete dans le drawer) -------- */
+function ProductCard({ product, disabled, onStartEdit }) {
+  const thumb =
+    product.image_url || product.photo_url || product.image || product.thumbnail ||
+    product.photo || product.url_photo || product.imageUrl || product.imageURL ||
+    product.picture || product.pic || product.url || null;
+
+  return (
+    <div style={{ background:"#fff", border:"1px solid #e6e8ee", borderRadius:16, padding:14, boxShadow:"0 8px 24px rgba(15,23,42,.04)" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "44px 1fr auto", gap: 10, alignItems: "center" }}>
+        <div style={{ width: 44, height: 44, borderRadius: 10, border: "1px solid #e6e8ee", display: "grid", placeItems: "center", overflow: "hidden" }}>
+          {thumb ? (
+            <img
+              src={thumb}
+              alt=""
+              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            />
+          ) : (
+            <span aria-hidden>🍞</span>
+          )}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          <div style={{ fontWeight: 600, fontSize: 15 }}>
+            {product.name}{" "}
+            {!product.is_active && (
+              <span
+                style={{
+                  marginLeft:8,
+                  fontSize:11,
+                  padding:"2px 8px",
+                  borderRadius:999,
+                  border:"1px solid #fca5a5",
+                  background:"#fee2e2",
+                  color:"#991b1b"
+                }}
+              >
+                Archivé
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 12, color: "#6b7280" }}>
+            {(product.dept || "—")} • {(product.unit || "u")} •{" "}
+            {Number(product.price || 0).toFixed(2)}€
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <button
+            onClick={onStartEdit}
+            style={BTN(false)}
+            disabled={disabled}
+            title={disabled ? "Un produit est déjà en édition" : "Éditer"}
+          >
+            Éditer
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------- drawer latéral pour éditer un produit -------- */
+function EditDrawer({
+  editing,
+  setEditing,
+  savingEdit,
+  onSave,
+  onCancel,
+  onArchiveToggle,
+  onHardDelete
+}) {
+  if (!editing) return null;
+
+  return (
+    <>
+      {/* fond gris semi-transparent derrière le panneau */}
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          background: "rgba(15,23,42,0.4)",
+          zIndex: 999
+        }}
+        onClick={() => {
+          // clic en dehors = même effet que Annuler
+          if (!savingEdit) onCancel();
+        }}
+      />
+
+      {/* panneau latéral à droite */}
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          right: 0,
+          height: "100%",
+          width: "100%",
+          maxWidth: 380,
+          background: "#fff",
+          borderLeft: "1px solid #e6e8ee",
+          borderRadius: "16px 0 0 16px",
+          boxShadow: "0 24px 48px rgba(15,23,42,.18)",
+          display: "flex",
+          flexDirection: "column",
+          zIndex: 1000,
+          fontFamily: FONT_STACK
+        }}
+      >
+        {/* HEADER */}
+        <div
+          style={{
+            padding: "16px 16px 12px",
+            borderBottom: "1px solid #e6e8ee",
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
+            gap: 8
+          }}
+        >
+          <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.2 }}>
+            Modifier le produit
+            {!editing.is_active && (
+              <span
+                style={{
+                  marginLeft: 8,
+                  fontSize: 11,
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  border: "1px solid #fca5a5",
+                  background: "#fee2e2",
+                  color: "#991b1b"
+                }}
+              >
+                Archivé
+              </span>
+            )}
+            <div
+              style={{
+                color: "#6b7280",
+                fontSize: 12,
+                fontWeight: 400,
+                marginTop: 4
+              }}
+            >
+              Mets à jour le nom, le département, le prix…
+            </div>
+          </div>
+
+          <button
+            onClick={onCancel}
+            style={{
+              ...BTN(false),
+              padding: "8px 10px",
+              fontSize: 13,
+              lineHeight: 1
+            }}
+            disabled={savingEdit}
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* CONTENU SCROLLABLE */}
+        <div
+          style={{
+            flex: 1,
+            overflowY: "auto",
+            padding: 16
+          }}
+        >
+          {/* Boutons archiver / supprimer */}
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              marginBottom: 16
+            }}
+          >
+            <button
+              onClick={onArchiveToggle}
+              style={BTN(false)}
+              disabled={savingEdit}
+            >
+              {editing.is_active ? "Archiver" : "Restaurer"}
+            </button>
+
+            <button
+              onClick={onHardDelete}
+              style={BTN_DANGER}
+              disabled={savingEdit}
+            >
+              Supprimer définitivement
+            </button>
+          </div>
+
+          {/* Formulaire */}
+          <div className="drawer-grid">
+            {/* Nom */}
+            <div className="drawer-wide">
+              <div style={LABEL}>Nom</div>
+              <input
+                value={editing.name}
+                onChange={(e) =>
+                  setEditing((v) => ({ ...v, name: e.target.value }))
+                }
+                style={INPUT}
+                placeholder="Nom du produit"
+              />
+            </div>
+
+            {/* Dept */}
+            <div>
+              <div style={LABEL}>Dept</div>
+              <select
+                value={editing.dept}
+                onChange={(e) =>
+                  setEditing((v) => ({ ...v, dept: e.target.value }))
+                }
+                style={INPUT}
+              >
+                <option value="">— choisir —</option>
+                {/* IMPORTANT : ces valeurs doivent matcher ta contrainte products_dept_check */}
+                <option value="vente">vente</option>
+                <option value="patiss">patiss</option>
+                <option value="boulanger">boulanger</option>
+              </select>
+            </div>
+
+            {/* Unité (affichage) */}
+            <div>
+              <div style={LABEL}>Unité (affichage)</div>
+              <select
+                value={editing.unit}
+                onChange={(e) =>
+                  setEditing((v) => ({ ...v, unit: e.target.value }))
+                }
+                style={INPUT}
+              >
+                <option value="u">u</option>
+                <option value="kg">kg</option>
+                <option value="carton">carton</option>
+                <option value="sac">sac</option>
+                <option value="boite">boite</option>
+                <option value="barquette">barquette</option>
+                <option value="pièce">pièce</option>
+              </select>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "#6b7280",
+                  marginTop: 6
+                }}
+              >
+                (Info : l’unité n’est pas enregistrée en base)
+              </div>
+            </div>
+
+            {/* Prix */}
+            <div>
+              <div style={LABEL}>Prix (€)</div>
+              <input
+                type="number"
+                step="0.01"
+                value={editing.price}
+                onChange={(e) =>
+                  setEditing((v) => ({ ...v, price: e.target.value }))
+                }
+                style={INPUT}
+                placeholder="0.00"
+              />
+            </div>
+
+            {/* Image URL */}
+            <div className="drawer-wide">
+              <div style={LABEL}>Image (URL)</div>
+              <input
+                value={editing.image_url}
+                onChange={(e) =>
+                  setEditing((v) => ({ ...v, image_url: e.target.value }))
+                }
+                style={INPUT}
+                placeholder="https://…"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* FOOTER */}
+        <div
+          style={{
+            padding: 16,
+            borderTop: "1px solid #e6e8ee",
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 8
+          }}
+        >
+          <button
+            onClick={onSave}
+            style={BTN(true)}
+            disabled={savingEdit}
+          >
+            {savingEdit ? "Enregistrement…" : "Enregistrer"}
+          </button>
+          <button
+            onClick={onCancel}
+            style={BTN(false)}
+            disabled={savingEdit}
+          >
+            Annuler
+          </button>
+        </div>
+
+        <style jsx>{`
+          .drawer-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+          }
+          .drawer-wide {
+            grid-column: span 1 / span 1;
+          }
+          @media (min-width: 500px) {
+            .drawer-grid {
+              grid-template-columns: 1fr 1fr;
+            }
+            .drawer-wide {
+              grid-column: span 2 / span 2;
+            }
+          }
+        `}</style>
+      </div>
+    </>
   );
 }

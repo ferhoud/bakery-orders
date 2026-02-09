@@ -490,6 +490,7 @@ export default function BecusHome() {
   const [showPhoneEditor, setShowPhoneEditor] = useState(false);
   const [phoneDraft, setPhoneDraft] = useState("");
   const [showInitialDetails, setShowInitialDetails] = useState(true);
+  const [waConfirm, setWaConfirm] = useState(null); // { kind: "initial"|"delta", map: {pid:qty}, createdAt }
 
   useEffect(() => setMounted(true), []);
   useEffect(() => {
@@ -548,29 +549,36 @@ export default function BecusHome() {
     [productById]
   );
 
-  const initialBaseMap = useMemo(() => {
-    if (!isSent) return null;
-    const dbIni = dbSnap?.initial && Object.keys(dbSnap.initial).length ? dbSnap.initial : null;
-    if (dbIni) return dbIni;
-    const localIni = initialSnapLocal && Object.keys(initialSnapLocal).length ? initialSnapLocal : null;
-    return localIni;
-  }, [isSent, dbSnap?.initial, initialSnapLocal]);
-
-  const initialDisplayItems = useMemo(() => {
-    if (!isSent) return items;
-    return initialBaseMap ? itemsFromMap(initialBaseMap) : items;
-  }, [isSent, initialBaseMap, items]);
-
-  const displayCount = useMemo(
-    () => initialDisplayItems.reduce((a, it) => a + Number(it.qty || 0), 0),
-    [initialDisplayItems]
-  );
-  const displayTotal = useMemo(() => computeTotal(initialDisplayItems, productById), [initialDisplayItems, productById]);
-
-  const showInitialWarning = useMemo(() => isSent && !initialBaseMap, [isSent, initialBaseMap]);
-
   const initialSnapLocal = useMemo(() => (deliveryISO ? loadSnap("initial", deliveryISO) : null), [deliveryISO]);
-  const lastSnapLocal = useMemo(() => (deliveryISO ? loadSnap("last", deliveryISO) : null), [deliveryISO]);
+
+
+  // Référence confirmée (commande envoyée) : elle ne doit changer qu'après confirmation WhatsApp
+const confirmedBaseMap = useMemo(() => {
+  if (!isSent) return null;
+
+  const dbLast = dbSnap?.last && Object.keys(dbSnap.last).length ? dbSnap.last : null;
+  const dbIni = dbSnap?.initial && Object.keys(dbSnap.initial).length ? dbSnap.initial : null;
+
+  if (dbLast) return dbLast;
+  if (dbIni) return dbIni;
+
+  // Fallback local (per-device) : uniquement "initial" pour éviter qu'une page annexe écrase la référence
+  const localIni = initialSnapLocal && Object.keys(initialSnapLocal).length ? initialSnapLocal : null;
+  return localIni;
+}, [isSent, dbSnap?.last, dbSnap?.initial, initialSnapLocal]);
+
+const initialDisplayItems = useMemo(() => {
+  if (!isSent) return items;
+  return confirmedBaseMap ? itemsFromMap(confirmedBaseMap) : items;
+}, [isSent, confirmedBaseMap, items]);
+
+const displayCount = useMemo(
+  () => initialDisplayItems.reduce((a, it) => a + Number(it.qty || 0), 0),
+  [initialDisplayItems]
+);
+const displayTotal = useMemo(() => computeTotal(initialDisplayItems, productById), [initialDisplayItems, productById]);
+
+const showInitialWarning = useMemo(() => isSent && !confirmedBaseMap, [isSent, confirmedBaseMap]);
 
   const loadAll = useCallback(async () => {
     if (!deliveryISO) return;
@@ -662,11 +670,11 @@ export default function BecusHome() {
   const computeDelta = useCallback(() => {
     const cur = mapFromItems(items);
 
-    // Base priority: DB last -> DB initial -> local last -> local initial -> empty
+    // Base priority: DB last -> DB initial -> local initial -> empty
     const baseDbLast = dbSnap?.last && Object.keys(dbSnap.last).length ? dbSnap.last : null;
     const baseDbIni = dbSnap?.initial && Object.keys(dbSnap.initial).length ? dbSnap.initial : null;
 
-    const base = baseDbLast || baseDbIni || lastSnapLocal || initialSnapLocal || {};
+    const base = baseDbLast || baseDbIni || initialSnapLocal || {};
 
     const allIds = new Set([...Object.keys(base || {}), ...Object.keys(cur)]);
     const add = [];
@@ -697,9 +705,9 @@ export default function BecusHome() {
       cur,
       addForMsg,
       downForMsg,
-      baseSource: baseDbLast ? "db:last" : baseDbIni ? "db:initial" : lastSnapLocal ? "local:last" : initialSnapLocal ? "local:initial" : "none",
+      baseSource: baseDbLast ? "db:last" : baseDbIni ? "db:initial" : initialSnapLocal ? "local:initial" : "none",
     };
-  }, [items, dbSnap, lastSnapLocal, initialSnapLocal]);
+  }, [items, dbSnap, initialSnapLocal]);
 
   const pendingDelta = useMemo(
     () => (isSent ? computeDelta() : { add: [], down: [], cur: {}, addForMsg: [], downForMsg: [], baseSource: "none" }),
@@ -720,54 +728,80 @@ export default function BecusHome() {
   }, [whats?.phone, canEdit, isSent, items.length, hasPendingChanges]);
 
   const sendInitial = useCallback(async () => {
-    if (!order?.id) return;
-    if (!canEdit) return;
-    if (!whats?.phone) return;
-    if (!items.length) return;
-    if (isSent) return;
+  if (!order?.id) return;
+  if (!canEdit) return;
+  if (!whats?.phone) return;
+  if (!items.length) return;
+  if (isSent) return;
+  if (waConfirm) return;
 
-    const text = buildFullOrderText({ deliveryISO, items, productById });
-    window.open(waLink(whats.phone, text), "_blank");
+  const text = buildFullOrderText({ deliveryISO, items, productById });
+  window.open(waLink(whats.phone, text), "_blank");
 
-    try {
-      await supabase.from("orders").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", order.id);
-    } catch {}
-
-    const map = mapFromItems(items);
-
-    // Local snapshots (fallback)
-    saveSnap("initial", deliveryISO, map);
-    saveSnap("last", deliveryISO, map);
-
-    // Shared snapshots (DB)
-    await writeSnapshot(order.id, "initial", map);
-    await writeSnapshot(order.id, "last", map);
-
-    try {
-      const r = await supabase.from("orders").select("*").eq("id", order.id).maybeSingle();
-      if (!r.error && r.data) setOrder(r.data);
-    } catch {}
-
-    setDbSnap({ initial: map, last: map, ready: true, source: "db" });
-  }, [order?.id, canEdit, whats?.phone, items, deliveryISO, productById, isSent, order]);
+  // IMPORTANT: on ne "valide" rien tant que l’utilisateur n’a pas confirmé que le message WhatsApp est parti.
+  const map = mapFromItems(items);
+  setWaConfirm({ kind: "initial", map, createdAt: Date.now() });
+}, [order?.id, canEdit, whats?.phone, items, deliveryISO, productById, isSent, waConfirm]);
 
   const sendDelta = useCallback(async () => {
-    if (!order?.id) return;
-    if (!canEdit) return;
-    if (!whats?.phone) return;
-    if (!isSent) return;
+  if (!order?.id) return;
+  if (!canEdit) return;
+  if (!whats?.phone) return;
+  if (!isSent) return;
+  if (waConfirm) return;
 
-    const { addForMsg, downForMsg, cur } = pendingDelta || {};
-    if (!addForMsg?.length && !downForMsg?.length) return;
+  const { addForMsg, downForMsg, cur } = pendingDelta || {};
+  if (!addForMsg?.length && !downForMsg?.length) return;
 
-    const text = buildDeltaText({ deliveryISO, deltaAdd: addForMsg, deltaDown: downForMsg, productById });
-    window.open(waLink(whats.phone, text), "_blank");
+  const text = buildDeltaText({ deliveryISO, deltaAdd: addForMsg, deltaDown: downForMsg, productById });
+  window.open(waLink(whats.phone, text), "_blank");
 
-    // Update "last" baseline so the delta list becomes empty after sending
-    saveSnap("last", deliveryISO, cur);
-    await writeSnapshot(order.id, "last", cur);
-    setDbSnap((prev) => ({ ...(prev || {}), last: cur, ready: true }));
-  }, [order?.id, canEdit, whats?.phone, deliveryISO, productById, isSent, pendingDelta]);
+  // IMPORTANT: on ne met pas à jour la référence tant que l’utilisateur n’a pas confirmé l’envoi WhatsApp.
+  setWaConfirm({ kind: "delta", map: cur || {}, createdAt: Date.now() });
+}, [order?.id, canEdit, whats?.phone, isSent, pendingDelta, deliveryISO, productById, waConfirm]);
+
+const cancelWaConfirm = useCallback(() => {
+  setWaConfirm(null);
+}, []);
+
+const confirmWaSent = useCallback(async () => {
+  if (!waConfirm || !order?.id) return;
+
+  const kind = waConfirm.kind;
+  const map = waConfirm.map || {};
+
+  try {
+    if (kind === "initial") {
+      // Marquer "envoyée" seulement après confirmation
+      try {
+        await supabase.from("orders").update({ status: "sent", sent_at: new Date().toISOString() }).eq("id", order.id);
+      } catch {}
+
+      // Snapshots: initial + last = état confirmé
+      saveSnap("initial", deliveryISO, map);
+      saveSnap("last", deliveryISO, map);
+
+      await writeSnapshot(order.id, "initial", map);
+      await writeSnapshot(order.id, "last", map);
+
+      try {
+        const r = await supabase.from("orders").select("*").eq("id", order.id).maybeSingle();
+        if (!r.error && r.data) setOrder(r.data);
+      } catch {}
+
+      setDbSnap({ initial: map, last: map, ready: true, source: "db" });
+    }
+
+    if (kind === "delta") {
+      // Snapshots: last = nouvel état confirmé
+      saveSnap("last", deliveryISO, map);
+      await writeSnapshot(order.id, "last", map);
+      setDbSnap((prev) => ({ ...(prev || {}), last: map, ready: true, source: "db" }));
+    }
+  } finally {
+    setWaConfirm(null);
+  }
+}, [waConfirm, order?.id, deliveryISO]);
 
   const resetBaselineToCurrent = useCallback(async () => {
     if (!deliveryISO || !order?.id) return;
@@ -913,17 +947,17 @@ export default function BecusHome() {
 
             <div style={{ flex: 1, textAlign: "center", minWidth: 0 }}>
               <div style={styles.cardTitleCenter}>
-                {isSent ? "Commande initiale" : "Commande en cours"}
+                {isSent ? "Commande confirmée" : "Commande en cours"}
                 <span style={styles.datePill}> {deliveryISO ? isoToDDMMYYYY(deliveryISO) : ""}</span>
               </div>
               <div style={styles.smallMeta}>
                 {isSent
-                  ? "Envoyée. Pour modifier, utilise le bloc Ajout / Modification."
+                  ? "Commande confirmée (elle ne change qu’après WhatsApp). Pour modifier, utilise le bloc Ajout / Modification."
                   : "Prépare la commande, puis envoie sur WhatsApp."}
               </div>
               {showInitialWarning ? (
                 <div style={{ ...styles.smallMeta, color: "#b45309" }}>
-                  Référence initiale introuvable (snapshots). La carte affiche l’état actuel. Si besoin, clique sur “↺ Référence = actuel”.
+                  Référence confirmée introuvable (snapshots). La carte affiche l’état actuel. Si besoin, clique sur “↺ Référence = actuel”.
                 </div>
               ) : null}
             </div>
@@ -942,6 +976,31 @@ export default function BecusHome() {
               💬 WhatsApp
             </button>
           </div>
+
+          {waConfirm?.kind === "initial" ? (
+            <div
+              style={{
+                marginTop: 10,
+                padding: 12,
+                borderRadius: 12,
+                background: "rgba(22,163,74,0.08)",
+                border: "1px solid rgba(22,163,74,0.25)",
+              }}
+            >
+              <div style={{ fontSize: 13, color: "#065f46" }}>
+                WhatsApp a été ouvert. Une fois le message <strong>envoyé</strong> au fournisseur, clique sur{" "}
+                <strong>Confirmer envoyé</strong>.
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+                <button onClick={confirmWaSent} style={{ ...styles.pillBtn, background: "#16a34a", color: "#fff" }}>
+                  ✅ Confirmer envoyé
+                </button>
+                <button onClick={cancelWaConfirm} style={{ ...styles.pillBtn }}>
+                  Pas encore
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div
             style={{
@@ -1030,6 +1089,31 @@ export default function BecusHome() {
                 ↺ Référence = actuel
               </button>
             </div>
+
+            {waConfirm?.kind === "delta" ? (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: 12,
+                  borderRadius: 12,
+                  background: "rgba(22,163,74,0.08)",
+                  border: "1px solid rgba(22,163,74,0.25)",
+                }}
+              >
+                <div style={{ fontSize: 13, color: "#065f46" }}>
+                  WhatsApp a été ouvert. Une fois le message <strong>envoyé</strong>, clique sur <strong>Confirmer envoyé</strong> pour
+                  valider la modification.
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+                  <button onClick={confirmWaSent} style={{ ...styles.pillBtn, background: "#16a34a", color: "#fff" }}>
+                    ✅ Confirmer envoyé
+                  </button>
+                  <button onClick={cancelWaConfirm} style={{ ...styles.pillBtn }}>
+                    Pas encore
+                  </button>
+                </div>
+              </div>
+            ) : null}
 
             <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
               {!whatsEnabledDelta ? <div style={{ ...styles.smallMeta, color: "#b45309" }}>{whatsDisabledReason}</div> : null}
